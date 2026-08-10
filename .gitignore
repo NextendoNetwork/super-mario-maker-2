@@ -1,0 +1,7 @@
+/super-mario-maker-2
+*.exe
+*.linux
+*.bin
+cert.pem
+key.pem
+nextendo_secret.key
