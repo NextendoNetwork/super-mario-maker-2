@@ -16,6 +16,13 @@ import (
 	nex "github.com/NextendoNetwork/nextendo-nex"
 )
 
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 // smm2EmptyBuilders : par méthode DataStore de contenu, écrit l'enveloppe VIDE valide.
 // (courses/users/maps/comments = list<T> vide ; + bool result=true / list<result> vide selon la méthode.)
 var smm2EmptyBuilders = map[uint32]func(*nex.StreamOut){
@@ -58,8 +65,16 @@ func smm2DataStoreHandler() nex.RMCHandler {
 
 		// --- Dynamic profile: rewrite the measured identity to the connected account.
 		// get_users(48): one profile per requested pid (never the 261 measured users).
-		if req.Method == 48 && len(userInfoTemplate) > 0 {
-			return smm2GetUsers(conn, req)
+		if req.Method == 48 {
+			if len(userInfoTemplate) > 0 {
+				return smm2GetUsers(conn, req)
+			}
+			// Fallback: return empty user list + empty result list (stub for public build)
+			out := nex.NewStreamOut(s)
+			out.U32(0)   // list<UserInfo> count = 0
+			out.U32(0)   // list<result> count = 0
+			fmt.Printf("[SMM2 DataStore] get_users(48) -> empty fallback (no template)\n")
+			return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
 		}
 		// sync_user_profile(49): the OWN profile — patch pid + pseudo into the template.
 		if req.Method == 49 {
@@ -68,6 +83,38 @@ func smm2DataStoreHandler() nex.RMCHandler {
 				fmt.Printf("[SMM2 DataStore] sync_user_profile(49) -> pseudo Nextendo pid=%d\n", conn.PID)
 				return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, body)
 			}
+			// Fallback: return empty profile (stub for public build without templates)
+			out := nex.NewStreamOut(s)
+			out.U32(0) // Empty struct/result
+			fmt.Printf("[SMM2 DataStore] sync_user_profile(49) -> empty fallback (no template)\n")
+			return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
+		}
+		// post_relation_data(47): save relation data - expect bool result (true = success)
+		if req.Method == 47 {
+			// DEBUG: Parse the payload to understand structure
+			fmt.Printf("[SMM2 DataStore] post_relation_data(47) received %d bytes\n", len(req.Body))
+			if len(req.Body) > 0 {
+				fmt.Printf("[SMM2 DataStore] Payload (hex): %x\n", req.Body)
+				in := nex.NewStreamIn(req.Body, s)
+				// Try to parse as Mii data
+				relationType := in.U32() // relation type?
+				fmt.Printf("[SMM2 DataStore] Parsed U32(0): %d\n", relationType)
+				if in.Remaining() > 0 {
+					nextU32 := in.U32()
+					fmt.Printf("[SMM2 DataStore] Parsed U32(1): %d\n", nextU32)
+				}
+			}
+			out := nex.NewStreamOut(s)
+			out.Bool(true) // Success
+			fmt.Printf("[SMM2 DataStore] post_relation_data(47) -> responding with true\n")
+			return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
+		}
+		// get_ranking_by_pid(154): try single U32 only
+		if req.Method == 154 {
+			out := nex.NewStreamOut(s)
+			out.U32(0) // Just empty count
+			fmt.Printf("[SMM2 DataStore] get_ranking_by_pid(154) -> U32(0) only\n")
+			return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
 		}
 
 		// --- Level storage: real object upload/download on the Nextendo VPS.
@@ -104,10 +151,9 @@ func smm2DataStoreHandler() nex.RMCHandler {
 
 		body, ok := capturedResponses[replayKey(0x73, req.Method)]
 		if !ok {
-			out := nex.NewStreamOut(s)
-			out.U32(0)
-			fmt.Printf("[SMM2 DataStore] UNCAPTURED 0x73.%d call=%d -> empty-list fallback\n", req.Method, req.CallID)
-			return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
+			// Return DataStore::NotFound for unimplemented methods
+			fmt.Printf("[SMM2 DataStore] UNCAPTURED 0x73.%d call=%d -> NotFound error\n", req.Method, req.CallID)
+			return nex.NewRMCError(s, 0x73, req.CallID, 0x80690004) // DataStore::NotFound
 		}
 		fmt.Printf("[SMM2 DataStore] 0x73.%d -> replay structurel (%do)\n", req.Method, len(body))
 		return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, body)
