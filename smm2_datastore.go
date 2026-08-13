@@ -48,6 +48,24 @@ var smm2EmptyBuilders = map[uint32]func(*nex.StreamOut){
 	160: func(o *nex.StreamOut) { o.U32(0); o.U32(0) },           // get_world_map: maps[], results[]
 	162: func(o *nex.StreamOut) { o.U32(0) },                     // search_world_map_pick_up: maps[]
 
+	// --- Leaderboard-facing methods, per kinnay/NintendoClients wiki (Data-Store-Protocol SMM2) —
+	//     none were implemented before, so Leaderboards fell through to NotFound. Same "empty
+	//     tuple" pattern; a List<UserInfo> and a List<CourseInfo> both encode as U32(0) when empty,
+	//     so labeling doesn't matter for the empty case.
+	50: func(o *nex.StreamOut) { o.U32(0); o.U32(0); o.Bool(true) }, // search_users_user_point: users[], ranks[], result
+	51: func(o *nex.StreamOut) { o.U32(0); o.U32(0); o.Bool(true) }, // search_users_endless_mode: users[], unk[], unk
+	52: func(o *nex.StreamOut) { o.U32(0); o.U32(0); o.Bool(true) }, // search_users_battle_mode: users[], unk[], unk
+	56: func(o *nex.StreamOut) { o.U32(0); o.Bool(true) },           // search_users_followee: users[], unk
+	57: func(o *nex.StreamOut) { o.U32(0); o.U32(0); o.Bool(true) }, // search_users_clear_ranking: users[], unk[], unk
+
+	// --- NOT documented at all by kinnay/NintendoClients (no request/response shape given).
+	//     Traced by call sequence in measured_live.txt: 147 fires right before the client
+	//     re-prompts Mii/name creation (the "M" leaderboard tab); 168 fires right before the
+	//     "Favorites" error. Best-guess empty tuple, same shape as their documented siblings —
+	//     unverified, revisit if a real capture or doc turns up.
+	147: func(o *nex.StreamOut) { o.U32(0); o.Bool(true) }, // search_users_official (undocumented)
+	168: func(o *nex.StreamOut) { o.U32(0); o.Bool(true) }, // search_users_followee_v2 (undocumented)
+
 	// --- Méthodes NON documentées (SMM2 3.x) qui peuplent le HUB Course World (Hot/Popular/New) :
 	//     structure déduite en parsant les réponses capturées (list<CourseInfo>[+ranks][+bool]).
 	//     Ce sont elles qui affichaient les faux niveaux Nintendo -> on les vide aussi.
@@ -69,12 +87,10 @@ func smm2DataStoreHandler() nex.RMCHandler {
 			if len(userInfoTemplate) > 0 {
 				return smm2GetUsers(conn, req)
 			}
-			// Fallback: return empty user list + empty result list (stub for public build)
-			out := nex.NewStreamOut(s)
-			out.U32(0)   // list<UserInfo> count = 0
-			out.U32(0)   // list<result> count = 0
-			fmt.Printf("[SMM2 DataStore] get_users(48) -> empty fallback (no template)\n")
-			return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
+			// No byte-exact captured template loaded: use whatever the caller actually
+			// REGISTERED via RegisterUser(47) instead of always answering 0 users — this is
+			// what makes a Mii/name registration survive leaving and re-entering the game.
+			return smm2GetUsersFromProfiles(conn, req)
 		}
 		// sync_user_profile(49): the OWN profile — patch pid + pseudo into the template.
 		if req.Method == 49 {
@@ -83,38 +99,44 @@ func smm2DataStoreHandler() nex.RMCHandler {
 				fmt.Printf("[SMM2 DataStore] sync_user_profile(49) -> pseudo Nextendo pid=%d\n", conn.PID)
 				return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, body)
 			}
-			// Fallback: return empty profile (stub for public build without templates)
-			out := nex.NewStreamOut(s)
-			out.U32(0) // Empty struct/result
-			fmt.Printf("[SMM2 DataStore] sync_user_profile(49) -> empty fallback (no template)\n")
-			return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
+			// No captured template: build from whatever was REGISTERED for this pid, instead
+			// of a bare U32(0) (which wasn't even a valid SyncUserProfileResult to begin with).
+			r := profiles.get(conn.PID)
+			body := syntheticSyncProfileResult(s, conn.PID, r)
+			fmt.Printf("[SMM2 DataStore] sync_user_profile(49) -> pid=%d registered=%v\n", conn.PID, r != nil)
+			return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, body)
 		}
-		// post_relation_data(47): save relation data - expect bool result (true = success)
+		// (47) RegisterUser — per kinnay/NintendoClients wiki (Data-Store-Protocol SMM2), this is
+		// NOT "post_relation_data": it's where the client sends its just-built maker profile
+		// (username, Mii, region/country). We now parse and PERSIST it (smm2_users.go) so a
+		// future feature can use it, but we don't change get_users/sync_user_profile's
+		// response shape yet — isolating this step's risk to "does RegisterUser's own
+		// response change break anything", nothing else.
 		if req.Method == 47 {
-			// DEBUG: Parse the payload to understand structure
-			fmt.Printf("[SMM2 DataStore] post_relation_data(47) received %d bytes\n", len(req.Body))
-			if len(req.Body) > 0 {
-				fmt.Printf("[SMM2 DataStore] Payload (hex): %x\n", req.Body)
-				in := nex.NewStreamIn(req.Body, s)
-				// Try to parse as Mii data
-				relationType := in.U32() // relation type?
-				fmt.Printf("[SMM2 DataStore] Parsed U32(0): %d\n", relationType)
-				if in.Remaining() > 0 {
-					nextU32 := in.U32()
-					fmt.Printf("[SMM2 DataStore] Parsed U32(1): %d\n", nextU32)
-				}
-			}
-			out := nex.NewStreamOut(s)
-			out.Bool(true) // Success
-			fmt.Printf("[SMM2 DataStore] post_relation_data(47) -> responding with true\n")
-			return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
+			return smm2RegisterUser(conn, req)
 		}
-		// get_ranking_by_pid(154): try single U32 only
+		// (154) GetEventCourseStatus — per kinnay/NintendoClients wiki, NOT "get_ranking_by_pid":
+		// takes no parameters and returns EventCourseStatusInfo{Uint64, Bool, DateTime}. We have
+		// no active event course, so serve a neutral status instead of a bare U32(0) (which isn't
+		// even the right shape — EventCourseStatusInfo isn't a list at all).
 		if req.Method == 154 {
-			out := nex.NewStreamOut(s)
-			out.U32(0) // Just empty count
-			fmt.Printf("[SMM2 DataStore] get_ranking_by_pid(154) -> U32(0) only\n")
-			return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
+			body := nex.NewStreamOut(s)
+			body.U64(0)      // unknown
+			body.Bool(false) // unknown (likely "event active"-style flag)
+			body.DateTime(0) // unknown
+			resp := frameStruct(s, 0, body.Bytes())
+			fmt.Printf("[SMM2 DataStore] GetEventCourseStatus(154) -> neutral EventCourseStatusInfo\n")
+			return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, resp)
+		}
+
+		// (59) UpdateLastLoginTime — per kinnay/NintendoClients wiki: no parameters, no return
+		// value. Wasn't implemented at all before (fell through to NotFound), and this call
+		// shows up right around Courses-list entry in measured_live.txt — a likely trigger for
+		// getting kicked back to account/Mii creation, since an error here could read to the
+		// client as "this session has no valid login".
+		if req.Method == 59 {
+			fmt.Printf("[SMM2 DataStore] UpdateLastLoginTime(59) pid=%d -> ack (no return value)\n", conn.PID)
+			return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
 		}
 
 		// --- Level storage: real object upload/download on the Nextendo VPS.
@@ -125,17 +147,26 @@ func smm2DataStoreHandler() nex.RMCHandler {
 			return smm2PrepareGetObject(conn, req)
 		case 26:
 			return smm2CompletePostObject(conn, req)
+		case 60:
+			// CanPostCourse: no request params, response {Bool, Uint32} — documented.
+			return smm2CanPostCourse(conn, req)
 		case 66:
-			// Course level-data upload prep: replay the measured S3 descriptor with the
-			// bucket host rewritten to our object store.
-			if tmpl, ok := capturedResponses[replayKey(0x73, 66)]; ok {
-				body := rewriteUploadHost(tmpl)
-				fmt.Printf("[SMM2 Storage] upload-prep 0x73.66 (données niveau) -> URL réécrite (%do)\n", len(body))
-				return nex.NewRMCSuccess(s, 0x73, 66, req.CallID, body)
-			}
+			// Course level-data upload prep: built from the documented DataStoreReqPostInfo
+			// shape (smm2_objects.go), not a patched Copilot-generated blob.
+			return smm2PreparePostObjectCourse(conn, req)
+		case 68:
+			// CompletePostObjectsCourse: per spec, no return value.
+			return smm2CompletePostObjectsCourse(conn, req)
+		case 69:
+			// UpdateCourseTag: per spec, no return value.
+			return smm2UpdateCourseTag(conn, req)
 		case 132:
-			// Relation-data upload prep (thumbnails + clear-check): per-type descriptor.
+			// Relation-data upload prep (thumbnails + clear-check): a fresh
+			// RelationObjectReqPostInfo per call, built from the documented shape.
 			return smm2PrepareRelationUpload(conn, req)
+		case 133:
+			// CompletePostRelationObject: undocumented in detail, acked like its siblings.
+			return smm2CompletePostRelationObject(conn, req)
 		}
 
 		if build, ok := smm2EmptyBuilders[req.Method]; ok {

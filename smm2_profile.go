@@ -211,3 +211,20 @@ func parseGetUsersPIDs(conn *nex.Connection, req *nex.RMCMessage) []uint64 {
 	}
 	return pids
 }
+
+// parseGetUsersOption re-reads just the trailing resultOption u32 from
+// GetUsersParam, separate from parseGetUsersPIDs so nothing that already depends on
+// that function's exact signature is touched.
+func parseGetUsersOption(conn *nex.Connection, req *nex.RMCMessage) uint32 {
+	in := nex.NewStreamIn(req.Body, conn.Settings)
+	_ = in.U8()
+	sub := in.Substream()
+	n := sub.U32()
+	for i := uint32(0); i < n; i++ {
+		_ = sub.PID()
+	}
+	if sub.Remaining() >= 4 {
+		return sub.U32()
+	}
+	return 0
+}
