@@ -32,6 +32,11 @@ var smm2EmptyBuilders = map[uint32]func(*nex.StreamOut){
 	53: func(o *nex.StreamOut) { o.U32(0) },                      // search_users_played_course: users[]
 	54: func(o *nex.StreamOut) { o.U32(0) },                      // search_users_cleared_course
 	55: func(o *nex.StreamOut) { o.U32(0) },                      // search_users_positive_rated_course
+	// 70 (get_courses): REVERTED to empty. A real successful upload session (captured before
+	// smm2GetCourses existed) showed the client sail through 68->70(empty)->69 without any
+	// retry loop or "Upload failed" — the full CourseInfo response we tried instead produced
+	// the same fixed 8x-retry-then-fail pattern regardless of what we put in it. The
+	// course's shareable code still needs a real home; it isn't this response.
 	70: func(o *nex.StreamOut) { o.U32(0); o.U32(0) },            // get_courses: courses[], results[]
 	71: func(o *nex.StreamOut) { o.U32(0); o.U32(0); o.Bool(true) }, // point_ranking: courses[], ranks[], result
 	73: func(o *nex.StreamOut) { o.U32(0); o.Bool(true) },        // search_courses_latest: courses[], result
@@ -169,8 +174,12 @@ func smm2DataStoreHandler() nex.RMCHandler {
 			// shape (smm2_objects.go), not a patched Copilot-generated blob.
 			return smm2PreparePostObjectCourse(conn, req)
 		case 68:
-			// CompletePostObjectsCourse: per spec, no return value.
-			return smm2CompletePostObjectsCourse(conn, req)
+			// CompletePostObjectsCourse: per spec, no return value. Reverted to a plain
+			// ack — a real successful upload session (before we added smm2GetCourses'
+			// rich response for method 70) showed this exact sequence completing fine:
+			// 68 -> ack, 70 -> EMPTY (fell through to smm2EmptyBuilders), 69 -> ack, done.
+			// Returning a full CourseInfo from 68 didn't help either (same retry loop).
+			return smm2CompletePostObjectsCourseAck(conn, req)
 		case 69:
 			// UpdateCourseTag: per spec, no return value.
 			return smm2UpdateCourseTag(conn, req)

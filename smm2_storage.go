@@ -51,15 +51,19 @@ var (
 
 // courseMeta is the catalog entry for one uploaded course.
 type courseMeta struct {
-	DataID    uint64   `json:"data_id"`
-	OwnerPID  uint64   `json:"owner_pid"`
-	Name      string   `json:"name"`
-	DataType  uint16   `json:"data_type"`
-	MetaHex   string   `json:"meta_hex"` // course header (SMM2 meta_binary), hex
-	Tags      []string `json:"tags"`
-	Size      uint32   `json:"size"`
-	Ready     bool     `json:"ready"` // set by complete_post_object
-	CreatedAt int64    `json:"created_at"`
+	DataID      uint64   `json:"data_id"`
+	OwnerPID    uint64   `json:"owner_pid"`
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	DataType    uint16   `json:"data_type"`
+	MetaHex     string   `json:"meta_hex"` // course header (SMM2 meta_binary), hex
+	Tags        []uint8  `json:"tags"`
+	GameStyle   uint8    `json:"game_style"`
+	CourseTheme uint8    `json:"course_theme"`
+	Difficulty  uint8    `json:"difficulty"`
+	Size        uint32   `json:"size"`
+	Ready       bool     `json:"ready"` // set by complete_post_object
+	CreatedAt   int64    `json:"created_at"`
 }
 
 type courseStore struct {
@@ -117,7 +121,7 @@ func (c *courseStore) persistLocked() {
 }
 
 // alloc reserves a new data_id and stashes the pending metadata.
-func (c *courseStore) alloc(ownerPID uint64, name string, dataType uint16, metaBin []byte, tags []string, size uint32) uint64 {
+func (c *courseStore) alloc(ownerPID uint64, name string, dataType uint16, metaBin []byte, tags []uint8, size uint32) uint64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	id := c.nextID
@@ -147,10 +151,53 @@ func (c *courseStore) complete(dataID uint64, ok bool) {
 	c.persistLocked()
 }
 
+// completeAllPendingFor marks every not-yet-ready course owned by pid as ready and
+// returns them. Used by CompletePostObjectsCourse(68), whose real param we don't parse
+// (undocumented fields), so we can't pull out a specific data_id the way
+// complete_post_object(26) can — but in practice a given connection only ever has one
+// course mid-upload at a time, so marking all of that pid's pending courses ready is
+// equivalent. Returning them lets the caller build a real CourseInfo response instead
+// of an empty one.
+func (c *courseStore) completeAllPendingFor(pid uint64) []*courseMeta {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var done []*courseMeta
+	for _, m := range c.byID {
+		if m.OwnerPID == pid && !m.Ready {
+			m.Ready = true
+			done = append(done, m)
+		}
+	}
+	if len(done) > 0 {
+		c.persistLocked()
+	}
+	return done
+}
+
 func (c *courseStore) get(dataID uint64) *courseMeta {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.byID[dataID]
+}
+
+// updateMeta writes the parsed name/description/tags/style/theme/difficulty from
+// CompletePostObjectsCourse(68) into the catalog entry.
+func (c *courseStore) updateMeta(dataID uint64, name, description string, tags []uint8, gameStyle, courseTheme, difficulty uint8) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	m := c.byID[dataID]
+	if m == nil {
+		return
+	}
+	if name != "" {
+		m.Name = name
+	}
+	m.Description = description
+	m.Tags = tags
+	m.GameStyle = gameStyle
+	m.CourseTheme = courseTheme
+	m.Difficulty = difficulty
+	c.persistLocked()
 }
 
 // setSize records the byte size once a blob PUT completes.
@@ -170,6 +217,7 @@ func startStorageServer() {
 	courses.load()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/object/", objectHandler)
+	mux.HandleFunc("/relation/", relationHandler)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
 	// S3-style presigned-POST upload: SMM2 uploads a course (method 66 = level data,
 	// 132 = thumbnails) as a multipart/form-data POST carrying a `key` + `file`, exactly
@@ -183,6 +231,14 @@ func startStorageServer() {
 		mux.ServeHTTP(w, r)
 	})
 	srv := &http.Server{Addr: fmt.Sprintf(":%d", storagePort), Handler: logged}
+	// (Previously disabled keep-alives here to test a theory about the relation-object
+	// uploads never reaching the server — that turned out NOT to be the actual fix
+	// (removing the "form" field's "key" entry was), and disabling keep-alives forces a
+	// full TLS handshake per request instead of reusing one connection across the level
+	// blob + 4 relation uploads. If the client has a fixed wall-clock timeout for the
+	// whole upload+completion handshake — consistent with the fixed ~8x retry-then-fail
+	// pattern we keep seeing regardless of response CONTENT — that extra per-request TLS
+	// cost could be exactly what's tipping it over. Re-enabling (the default) to test.
 	fmt.Printf("[SMM2 Storage] listening HTTPS :%d (blob store)\n", storagePort)
 	if err := srv.ListenAndServeTLS(certFile, keyFile); err != nil {
 		fmt.Printf("[SMM2 Storage] stopped: %v\n", err)
@@ -203,7 +259,12 @@ func objectHandler(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodPut, http.MethodPost:
-		body, _ := readAllLimited(r, 64<<20) // courses are small; cap at 64 MiB
+		body, err := extractBlobBody(r)
+		if err != nil {
+			fmt.Printf("[SMM2 Storage] %s /object/%d FAILED reading body: %v\n", r.Method, dataID, err)
+			http.Error(w, "bad body", http.StatusBadRequest)
+			return
+		}
 		if err := os.WriteFile(blobPath(dataID), body, 0o644); err != nil {
 			fmt.Printf("[SMM2 Storage] PUT %d FAILED: %v\n", dataID, err)
 			http.Error(w, "store failed", http.StatusInternalServerError)
@@ -222,6 +283,55 @@ func objectHandler(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Content-Length", strconv.Itoa(len(b)))
 		fmt.Printf("[SMM2 Storage] GET /object/%d -> %d bytes\n", dataID, len(b))
+		if r.Method == http.MethodGet {
+			w.Write(b)
+		}
+	default:
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+	}
+}
+
+// relationHandler stores relation-object blobs (thumbnails + clear-check replay)
+// sent by the console to the URL returned by PreparePostRelationObject(132).
+// The URL path is /relation/<key> and the body is the same multipart/form-data
+// envelope used for /object/ uploads (a "file" part carrying the raw blob).
+// On success we reply 204 with an ETag like S3 does.
+func relationHandler(w http.ResponseWriter, r *http.Request) {
+	key := strings.TrimPrefix(r.URL.Path, "/relation/")
+	if key == "" {
+		http.Error(w, "missing key", http.StatusBadRequest)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodPost, http.MethodPut:
+		blob, err := extractBlobBody(r)
+		if err != nil {
+			fmt.Printf("[SMM2 Storage] relation %s FAILED reading body: %v\n", key, err)
+			http.Error(w, "bad body", http.StatusBadRequest)
+			return
+		}
+		name := sanitizeKey(key)
+		if err := os.WriteFile(filepath.Join(storageDir, name), blob, 0o644); err != nil {
+			fmt.Printf("[SMM2 Storage] relation %s STORE FAIL: %v\n", key, err)
+			http.Error(w, "store failed", http.StatusInternalServerError)
+			return
+		}
+		sum := md5.Sum(blob)
+		w.Header().Set("ETag", fmt.Sprintf("%q", hex.EncodeToString(sum[:])))
+		w.Header().Set("Server", "AmazonS3")
+		w.Header().Set("x-amz-request-id", "NEXTENDO0000000000")
+		fmt.Printf("[SMM2 Storage] relation %s <- %d bytes (etag=%x)\n", key, len(blob), sum[:4])
+		w.WriteHeader(http.StatusNoContent) // 204, like S3
+	case http.MethodGet, http.MethodHead:
+		name := sanitizeKey(key)
+		b, err := os.ReadFile(filepath.Join(storageDir, name))
+		if err != nil {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Length", strconv.Itoa(len(b)))
 		if r.Method == http.MethodGet {
 			w.Write(b)
 		}
@@ -276,6 +386,31 @@ func s3PostHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("x-amz-request-id", "NEXTENDO0000000000")
 	fmt.Printf("[SMM2 Storage] UPLOAD OK key=%q -> %s (%d bytes, etag=%x)\n", key, name, len(blob), sum[:4])
 	w.WriteHeader(http.StatusNoContent) // 204, like S3
+}
+
+// extractBlobBody reads the uploaded course blob from a request to /object/<id>.
+// The console was measured sending this as multipart/form-data (not a plain PUT body
+// like the comment at the top of this file assumed "courses are small" for) — a real
+// upload came back as one big multipart envelope, and treating that whole envelope as
+// the level data would have written a corrupt (wrapped-in-boundaries) file. Parse the
+// form and pull out the "file" field when the content-type says multipart; otherwise
+// fall back to reading the raw body (a plain PUT with no form wrapping).
+func extractBlobBody(r *http.Request) ([]byte, error) {
+	ct := r.Header.Get("Content-Type")
+	if !strings.HasPrefix(ct, "multipart/") {
+		return readAllLimited(r, 64<<20)
+	}
+	if err := r.ParseMultipartForm(96 << 20); err != nil {
+		return nil, fmt.Errorf("multipart parse: %w", err)
+	}
+	if f, _, err := r.FormFile("file"); err == nil {
+		defer f.Close()
+		return io.ReadAll(io.LimitReader(f, 96<<20))
+	}
+	if vals := r.MultipartForm.Value["file"]; len(vals) > 0 {
+		return []byte(vals[0]), nil
+	}
+	return nil, fmt.Errorf("multipart body has no \"file\" field (fields=%v)", formFieldNames(r))
 }
 
 // sanitizeKey turns an S3 object key into a safe flat filename.

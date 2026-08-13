@@ -50,15 +50,22 @@ func smm2CanPostCourse(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessag
 }
 
 // smm2PreparePostObjectCourse (66): allocate a data_id for the course's level-data
-// blob and return a DataStoreReqPostInfo pointing at our own object store — built from
-// the documented structure, not a patched Copilot blob. PreparePostCourseParam's
-// fields are almost entirely undocumented ("Unknown"), so we don't try to extract a
-// declared size/name from it: our object store's courseMeta.Size self-corrects the
-// moment the real PUT/POST arrives (see objectHandler in smm2_storage.go), so nothing
-// downstream depends on knowing it up front.
+// blob and return a DataStoreReqPostInfo pointing at our own object store.
+// The PreparePostCourseParam body contains the course name, description, tags,
+// game_style, course_theme, and difficulty — we parse them here so the catalog
+// entry has real metadata from the start (before CompletePostObjectsCourse(68)).
 func smm2PreparePostObjectCourse(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
 	s := conn.Settings
+
+	// Parse PreparePostCourseParam: [version u8][body_len u32]
+	//   string name, string description, u32 tag_count, u8×N tags,
+	//   u8 game_style, u8 course_theme, u8 difficulty, ... (level binary blob follows)
+	name, description, tags, gameStyle, courseTheme, difficulty := parsePreparePostCourseParam(s, req.Body)
+
 	id := courses.alloc(conn.PID, "course", 0, nil, nil, 0)
+	if name != "" {
+		courses.updateMeta(id, name, description, tags, gameStyle, courseTheme, difficulty)
+	}
 	url := fmt.Sprintf("%s/object/%d", storageURL, id)
 
 	body := nex.NewStreamOut(s)
@@ -69,20 +76,127 @@ func smm2PreparePostObjectCourse(conn *nex.Connection, req *nex.RMCMessage) *nex
 	body.Buffer(courses.rootCA)
 	resp := frameStruct(s, 0, body.Bytes())
 
-	fmt.Printf("[SMM2 Storage] PreparePostObjectCourse(66) pid=%d -> data_id=%d (construit depuis le schéma documenté)\n", conn.PID, id)
+	fmt.Printf("[SMM2 Storage] PreparePostObjectCourse(66) pid=%d -> data_id=%d name=%q style=%d theme=%d diff=%d\n",
+		conn.PID, id, name, gameStyle, courseTheme, difficulty)
 	return nex.NewRMCSuccess(s, 0x73, 66, req.CallID, resp)
 }
 
+// parsePreparePostCourseParam decodes the PreparePostCourseParam body from method 66.
+// Observed layout (decoded from measured_live.txt line 15):
+//   [version u8][body_len u32]
+//   string  name
+//   string  description
+//   u32     tag_count
+//   u8×N    tags
+//   u8      game_style
+//   u8      course_theme
+//   u8      difficulty
+//   ...     (level binary + unknown trailing fields)
+func parsePreparePostCourseParam(s *nex.Settings, body []byte) (name, description string, tags []uint8, gameStyle, courseTheme, difficulty uint8) {
+	defer func() { recover() }()
+	in := nex.NewStreamIn(body, s)
+	_ = in.U8()           // struct version
+	sub := in.Substream() // param body
+	name = sub.String()
+	description = sub.String()
+	tagCount := sub.U32()
+	if tagCount <= 8 {
+		for i := uint32(0); i < tagCount; i++ {
+			tags = append(tags, sub.U8())
+		}
+	}
+	gameStyle = sub.U8()
+	courseTheme = sub.U8()
+	difficulty = sub.U8()
+	return
+}
+
+// smm2CompletePostObjectsCourseAck (68): plain ack, no CourseInfo — matches the exact
+// shape of a real successful upload session captured before smm2GetCourses' rich
+// response existed. Still marks the course ready so the catalog/dashboard are correct.
+func smm2CompletePostObjectsCourseAck(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
+	s := conn.Settings
+	done := courses.completeAllPendingFor(conn.PID)
+	if len(done) == 0 {
+		fmt.Printf("[SMM2 Storage] CompletePostObjectsCourse(68) pid=%d received %d bytes -> ack (no pending course)\n", conn.PID, len(req.Body))
+	} else {
+		fmt.Printf("[SMM2 Storage] CompletePostObjectsCourse(68) pid=%d received %d bytes -> ack + marked ready (data_id=%d, code=%s)\n",
+			conn.PID, len(req.Body), done[0].DataID, courseCode(done[0].DataID))
+	}
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
+}
+
 // smm2CompletePostObjectsCourse (68): per kinnay's wiki, "this method does not return
-// anything". CompletePostObjectsCourseParam is a handful of undocumented strings plus
-// a nested PreparePostCourseParam — we don't yet parse it for real course metadata
-// (title, tags), so a course uploaded through this path will show up with placeholder
-// metadata in our catalog until that param is reverse-engineered. Acknowledging it is
-// still what lets the client consider the course "posted" instead of stalling here.
+// anything" — but the user reported the client failing specifically when trying to get
+// the course's shareable code back after upload, and get_courses(70) right afterward
+// was retried 8 times in a row without the client ever being satisfied, exactly the
+// same "silently reject and retry" pattern we already saw and fixed for
+// PrepareRelationObject(132). Best next guess: the doc note about "no return value" is
+// wrong (or describes a different completion path), and the client actually wants the
+// finished CourseInfo — code included — back from THIS call, not a separate get_courses
+// round-trip. We now build and return it directly.
 func smm2CompletePostObjectsCourse(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
 	s := conn.Settings
-	fmt.Printf("[SMM2 Storage] CompletePostObjectsCourse(68) pid=%d received %d bytes -> ack (métadonnées non parsées)\n", conn.PID, len(req.Body))
+
+	done := courses.completeAllPendingFor(conn.PID)
+
+	if len(done) == 0 {
+		fmt.Printf("[SMM2 Storage] CompletePostObjectsCourse(68) pid=%d -> no pending course found, empty ack\n", conn.PID)
+	} else {
+		m := done[0]
+		fmt.Printf("[SMM2 Storage] CompletePostObjectsCourse(68) pid=%d data_id=%d -> ready (code=%s, empty ack per spec)\n", conn.PID, m.DataID, courseCode(m.DataID))
+	}
+	// TEST: back to an empty ack (per kinnay's original "no return value" doc) — the
+	// full-CourseInfo response was ALSO retried 8 times by the client even on its first,
+	// correctly-formed answer, so returning more data didn't stop the retries. Trying the
+	// opposite to see whether an empty ack is what the client actually expects here.
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
+}
+
+// parseCompletePostCourseDataID extracts just the data_id u64 from
+// CompletePostObjectsCourseParam. Layout (from measured_live.txt byte analysis):
+//   [version u8][body_len u32] string×3, u16, u8, string, u64(data_id) ...
+func parseCompletePostCourseDataID(s *nex.Settings, body []byte) (dataID uint64) {
+	defer func() { recover() }()
+	in := nex.NewStreamIn(body, s)
+	_ = in.U8()
+	sub := in.Substream()
+	_ = sub.String() // data_id_str repeated
+	_ = sub.String()
+	_ = sub.String()
+	_ = sub.U16() // unk u16
+	_ = sub.U8()  // unk u8 (extra byte before 4th string)
+	_ = sub.String()
+	dataID = sub.U64()
+	return
+}
+
+// parseCompletePostCourseParam is kept for reference but no longer used for metadata
+// (name/description are parsed from PreparePostObjectCourse(66) instead).
+func parseCompletePostCourseParam(s *nex.Settings, body []byte) (name, description string, tags []uint8, gameStyle, courseTheme, difficulty uint8, dataID uint64) {
+	defer func() { recover() }()
+	in := nex.NewStreamIn(body, s)
+	_ = in.U8()
+	sub := in.Substream()
+	_ = sub.String()
+	_ = sub.String()
+	_ = sub.String()
+	_ = sub.U16()
+	_ = sub.String()
+	dataID = sub.U64()
+	_ = sub.U32()
+	name = sub.String()
+	description = sub.String()
+	tagCount := sub.U32()
+	if tagCount <= 8 {
+		for i := uint32(0); i < tagCount; i++ {
+			tags = append(tags, sub.U8())
+		}
+	}
+	gameStyle = sub.U8()
+	courseTheme = sub.U8()
+	difficulty = sub.U8()
+	return
 }
 
 // smm2PrepareRelationUpload (132): a course has FOUR relation-data uploads — selected
@@ -91,28 +205,43 @@ func smm2CompletePostObjectsCourse(conn *nex.Connection, req *nex.RMCMessage) *n
 // (distinct object key); returning the exact same descriptor for all four was the old
 // approach's known failure ("hung the console mid-upload"). Now each call allocates its
 // own key and builds a RelationObjectReqPostInfo from the documented structure.
+//
+// FIX: the response's data_id field must ECHO the request's data_id (the course's own
+// data_id as a string, e.g. "1001" — confirmed via measured_live.txt: the client sends
+// that same string in every PrepareRelationObject request). We were returning our own
+// generated object key there instead, and the client silently rejected it and retried
+// the prepare call over and over (increasingly for later types) rather than ever
+// attempting the actual HTTP upload — never a hard error, just an infinite retry that
+// eventually surfaced as "Upload failed". The real per-object routing key still goes in
+// the "key" form field, which was already correct.
 func smm2PrepareRelationUpload(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
 	s := conn.Settings
 	in := nex.NewStreamIn(req.Body, s)
 	_ = in.U8()           // struct version
 	sub := in.Substream() // body: [data_id string][type u32][size u32][...]
-	_ = sub.String()      // data_id (as string) — echoes back what the client already knows
+	requestedDataID := sub.String()
 	relType := sub.U32()
 	reqSize := sub.U32() // byte-size of the asset the console is about to upload
 
 	key := fmt.Sprintf("relation_%d_%d_%d", conn.PID, relType, time.Now().UnixNano())
-	url := storageURL // our s3PostHandler is a catch-all on "/", any path works
+	// FIX: give it a real path, not just the bare host. method 66's url ("/object/<id>")
+	// worked and produced a real POST from the client; this one previously returned just
+	// storageURL with NO path at all, and NOT ONE of the 4 relation uploads ever reached
+	// our HTTP server (confirmed: zero "[SMM2 Storage] <-" log lines for any of them,
+	// across repeated client retries) — consistent with the client failing to build a
+	// valid request from a path-less URL before it ever leaves the console.
+	url := fmt.Sprintf("%s/relation/%s", storageURL, key)
 
 	body := nex.NewStreamOut(s)
-	body.String(key) // data_id (RelationObjectReqPostInfo's is a STRING, unlike 66/24's u64)
+	body.String(requestedDataID) // data_id: ECHO the course's own data_id, not a generated key
 	body.String(url)
-	writeKeyValueList(body, nil)                            // headers: none
-	writeKeyValueList(body, map[string]string{"key": key}) // form: the "key" our s3PostHandler reads
+	writeKeyValueList(body, nil) // headers: none
+	writeKeyValueList(body, nil) // form: empty — same as method 66; client POSTs blob directly
 	body.Buffer(courses.rootCA)
 	resp := frameStruct(s, 0, body.Bytes())
 
-	fmt.Printf("[SMM2 Storage] PreparePostRelationObject(132) type=%d size=%d pid=%d key=%q -> construit depuis le schéma documenté\n",
-		relType, reqSize, conn.PID, key)
+	fmt.Printf("[SMM2 Storage] PreparePostRelationObject(132) type=%d size=%d pid=%d data_id=%q key=%q -> construit depuis le schéma documenté (data_id échо)\n",
+		relType, reqSize, conn.PID, requestedDataID, key)
 	return nex.NewRMCSuccess(s, 0x73, 132, req.CallID, resp)
 }
 

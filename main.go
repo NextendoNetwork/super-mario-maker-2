@@ -133,6 +133,7 @@ func main() {
 	// phantom lobbies "searching" for a player who is long gone, and matchmaking can hand
 	// those dead sessions to real players.
 	secureEndpoint.OnDisconnect = func(c *nex.Connection) {
+		fmt.Printf("[SMM2 Secure] disconnected pid=%d id=%d addr=%s at %s\n", c.PID, c.ID, c.RemoteAddr, time.Now().Format("15:04:05.000"))
 		mm.RemovePlayer(c.PID)
 	}
 	secureServer := nex.NewServer(secureEndpoint)
@@ -329,7 +330,7 @@ func anonymousPID(username string) uint64 {
 
 func logRMC(tag string) func(*nex.Connection, *nex.RMCMessage) {
 	return func(c *nex.Connection, req *nex.RMCMessage) {
-		fmt.Printf("[SMM2 %s] pid=%d proto=%#x method=%d call=%d\n", tag, c.PID, req.Protocol, req.Method, req.CallID)
+		fmt.Printf("[%s] [SMM2 %s] pid=%d proto=%#x method=%d call=%d\n", time.Now().Format("15:04:05.000"), tag, c.PID, req.Protocol, req.Method, req.CallID)
 	}
 }
 
