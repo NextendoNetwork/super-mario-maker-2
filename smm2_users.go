@@ -169,40 +169,72 @@ func smm2RegisterUser(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage
 // Step 1 only stored what RegisterUser sent, without changing what get_users/
 // sync_user_profile answered — so even a PID that had already registered still got
 // "no profile" on every re-entry, and the client re-prompted Mii creation every single
-// time. These two builders close that loop: a registered PID gets a real (if minimal)
-// answer instead of the always-empty fallback.
+// time. These two builders close that loop: a registered PID gets a real answer
+// instead of the always-empty fallback.
 //
-// Deliberately compact, NOT the richer stat-map/badges shape we tried earlier and
-// confirmed (via measured_live.txt, multiple sessions) triggers a client-side
-// communication error for non-boot resultOptions. This mirrors the one shape we know
-// is safe: [pid][code][name][zero tail], sized like the one real capture we have.
+// FULL REWRITE: earlier versions of syntheticUserInfoFromProfile stopped after the Mii
+// bytes — country, region, last_active, the stat maps, badges, everything past that
+// was simply MISSING from the wire, not just empty. That's not a safe "minimal" shape,
+// it's a truncated one: any resultOption bit expecting those fields would desync.
+// Per the real UserInfo layout (nintendoclients.readthedocs.io reference for
+// nex.datastore_smm2, which the wiki itself cuts off before showing), the version-0
+// structure is: pid, code, name, unk1(UnknownStruct1), unk2(Mii bytes), country,
+// region, last_active(DateTime), unk3/4/5(bool), play_stats/maker_stats/
+// endless_challenge_high_scores/multiplayer_stats/unk7(Map<u8,u32>),
+// badges(List<BadgeInfo>), unk8/unk9(Map<u8,u32>) — no revision>=1/2/3 extras, since
+// our working compact template already used struct version=0 for 0xE284. Now build
+// ALL of those fields (empty maps/list where we have no real data, but PRESENT and
+// correctly typed) instead of stopping partway through.
 
-// syntheticUserInfoFromProfile builds a minimal UserInfo for get_users(48) from a
-// stored registration.
-//
-// CHANGED: now embeds the REAL captured UnknownStruct1 + Mii bytes instead of a flat
-// zero tail. Evidence for this: even with profiles.json already holding a registered
-// profile, the client STILL re-prompted Mii/name creation on the very first get_users
-// of a fresh session (measured_live.txt, clean repro) — meaning "pid found" alone isn't
-// what the client checks; it's specifically whether the Mii data it reads back looks
-// valid. We had the real Mii bytes captured from RegisterUser(47) the whole time but
-// never wrote them into this response.
+// writeU8U32Map writes a NEX Map<Uint8, Uint32> — used for UserInfo's several stat
+// maps (play_stats, maker_stats, endless_challenge_high_scores, multiplayer_stats,
+// and the two still-unknown unk7/unk8/unk9 maps).
+func writeU8U32Map(out *nex.StreamOut, m map[uint8]uint32) {
+	out.U32(uint32(len(m)))
+	for k, v := range m {
+		out.U8(k)
+		out.U32(v)
+	}
+}
+
+// syntheticUserInfoFromProfile builds a COMPLETE version-0 UserInfo for get_users(48)
+// from a stored registration — every documented field present, not just the
+// pid/code/name/Mii prefix we had before.
 func syntheticUserInfoFromProfile(s *nex.Settings, pid uint64, r *registeredProfile) []byte {
 	name := pseudoOr(pid)
 	var unk1, mii []byte
+	var country string
+	var region uint8
 	if r != nil {
 		if r.Username != "" {
 			name = r.Username
 		}
 		unk1 = r.unk1Bytes()
 		mii = r.miiBytes()
+		country = r.CountryCode
+		region = r.RegionID
 	}
+
 	out := nex.NewStreamOut(s)
 	out.PID(pid)
 	out.String(makerCode(pid))
 	out.String(name)
-	out.Write(frameStruct(s, 0, unk1)) // UnknownStruct1: real bytes if we captured them
-	out.QBuffer(mii)                   // Mii: the real bytes from RegisterUser, not zeros
+	out.Write(frameStruct(s, 0, unk1)) // unk1: UnknownStruct1 (pose/hat/shirt/pants), real if captured
+	out.QBuffer(mii)                   // unk2: Mii bytes, real if registered
+	out.String(country)
+	out.U8(region)
+	out.DateTime(nex.NowDateTime().Value()) // last_active
+	out.Bool(false)                         // unk3
+	out.Bool(false)                         // unk4
+	out.Bool(false)                         // unk5
+	writeU8U32Map(out, nil)                 // play_stats
+	writeU8U32Map(out, nil)                 // maker_stats
+	writeU8U32Map(out, nil)                 // endless_challenge_high_scores
+	writeU8U32Map(out, nil)                 // multiplayer_stats
+	writeU8U32Map(out, nil)                 // unk7
+	out.U32(0)                              // badges: List<BadgeInfo> count = 0
+	writeU8U32Map(out, nil)                 // unk8
+	writeU8U32Map(out, nil)                 // unk9
 	return frameStruct(s, 0, out.Bytes())
 }
 
@@ -233,26 +265,20 @@ func syntheticSyncProfileResult(s *nex.Settings, pid uint64, r *registeredProfil
 
 // smm2GetUsersFromProfiles answers get_users(48) using the registered-profile store.
 //
-// Only for resultOption==0xE284 do we serve the real registered profile (with real Mii
-// bytes, since that's what actually lets the client accept "you have a Maker" — tested
-// and confirmed via a clean repro: 0xE284 with real Mii got far enough to render Course
-// World for a frame). Serving that SAME data for 0x2284 was tried and made things
-// worse — a graceful bounce-back to Mii creation became a hard communication error.
-// That rules out "0x2284 just needs the same data" — it needs a genuinely different,
-// larger structure (more resultOption bits = more populated fields = more wire bytes),
-// which we still don't have the documented layout for. Back to serving 0 users for
-// anything other than 0xE284, which is at least not a hard error.
+// Now serves the COMPLETE version-0 UserInfo (see syntheticUserInfoFromProfile) for
+// ANY resultOption, not just 0xE284. Earlier attempts to serve non-0xE284 options real
+// data used a TRUNCATED structure (stopped after the Mii bytes) and made things worse
+// (hard communication error) — but that was testing an incomplete shape, not the full
+// documented one. Worth retrying now that every field is actually present.
 func smm2GetUsersFromProfiles(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
 	s := conn.Settings
 	pids := parseGetUsersPIDs(conn, req)
 	option := parseGetUsersOption(conn, req)
 
 	var users [][]byte
-	if option == 0xE284 {
-		for _, pid := range pids {
-			if r := profiles.get(pid); r != nil {
-				users = append(users, syntheticUserInfoFromProfile(s, pid, r))
-			}
+	for _, pid := range pids {
+		if r := profiles.get(pid); r != nil {
+			users = append(users, syntheticUserInfoFromProfile(s, pid, r))
 		}
 	}
 

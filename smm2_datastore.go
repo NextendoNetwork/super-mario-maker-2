@@ -140,6 +140,18 @@ func smm2DataStoreHandler() nex.RMCHandler {
 			return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
 		}
 
+		// (63, 65, 129) — NOT documented by kinnay/NintendoClients (link-less in the method
+		// table, or not indexed at all). All three arrive with len=0 (no parameters) right in
+		// the middle of otherwise-working sessions in measured_live.txt, and every OTHER
+		// parameterless method in this protocol we've confirmed (59, 68, 69, 133) turned out to
+		// have "no return value" — acking them the same way is the best-founded guess available
+		// right now, not a shot in the dark. If the client still resets the Mii after this,
+		// these three are ruled out and the search moves elsewhere.
+		if req.Method == 63 || req.Method == 65 || req.Method == 129 {
+			fmt.Printf("[SMM2 DataStore] method %d pid=%d -> ack (sin params, patrón \"sin retorno\", no verificado)\n", req.Method, conn.PID)
+			return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
+		}
+
 		// --- Level storage: real object upload/download on the Nextendo VPS.
 		switch req.Method {
 		case 24:
