@@ -41,6 +41,7 @@ var smm2EmptyBuilders = map[uint32]func(*nex.StreamOut){
 	79: func(o *nex.StreamOut) { o.U32(0) },                      // search_courses_endless_mode
 	80: func(o *nex.StreamOut) { o.U32(0); o.Bool(true) },        // search_courses_first_clear
 	81: func(o *nex.StreamOut) { o.U32(0); o.Bool(true) },        // search_courses_best_time
+	82: func(o *nex.StreamOut) { o.U32(0); o.Bool(true) },        // search_courses_followee_posted_by: courses[], result — confirmed via measured_live.txt: fell to NotFound (method=0 in the S->C log) since it was missing from this map
 	85: func(o *nex.StreamOut) { o.U32(0); o.U32(0) },            // get_courses_event: courses[], results[]
 	86: func(o *nex.StreamOut) { o.U32(0) },                      // search_courses_event
 	94: func(o *nex.StreamOut) { o.U32(0); o.Bool(true) },        // search_comments_in_order: comments[], result

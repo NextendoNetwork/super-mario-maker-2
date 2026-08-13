@@ -99,6 +99,22 @@ func (p *profileRegistry) get(pid uint64) *registeredProfile {
 	return p.byPID[pid]
 }
 
+func (r *registeredProfile) miiBytes() []byte {
+	if r == nil {
+		return nil
+	}
+	b, _ := hex.DecodeString(r.MiiDataHex)
+	return b
+}
+
+func (r *registeredProfile) unk1Bytes() []byte {
+	if r == nil {
+		return nil
+	}
+	b, _ := hex.DecodeString(r.Unk1Hex)
+	return b
+}
+
 // parseRegisterUserParam decodes RegisterUser(47)'s request body per
 // kinnay/NintendoClients' documented RegisterUserParam:
 //
@@ -163,16 +179,30 @@ func smm2RegisterUser(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage
 
 // syntheticUserInfoFromProfile builds a minimal UserInfo for get_users(48) from a
 // stored registration.
+//
+// CHANGED: now embeds the REAL captured UnknownStruct1 + Mii bytes instead of a flat
+// zero tail. Evidence for this: even with profiles.json already holding a registered
+// profile, the client STILL re-prompted Mii/name creation on the very first get_users
+// of a fresh session (measured_live.txt, clean repro) — meaning "pid found" alone isn't
+// what the client checks; it's specifically whether the Mii data it reads back looks
+// valid. We had the real Mii bytes captured from RegisterUser(47) the whole time but
+// never wrote them into this response.
 func syntheticUserInfoFromProfile(s *nex.Settings, pid uint64, r *registeredProfile) []byte {
 	name := pseudoOr(pid)
-	if r != nil && r.Username != "" {
-		name = r.Username
+	var unk1, mii []byte
+	if r != nil {
+		if r.Username != "" {
+			name = r.Username
+		}
+		unk1 = r.unk1Bytes()
+		mii = r.miiBytes()
 	}
 	out := nex.NewStreamOut(s)
 	out.PID(pid)
 	out.String(makerCode(pid))
 	out.String(name)
-	out.Write(make([]byte, 62)) // zero tail, sized like the one real 93-byte capture we have
+	out.Write(frameStruct(s, 0, unk1)) // UnknownStruct1: real bytes if we captured them
+	out.QBuffer(mii)                   // Mii: the real bytes from RegisterUser, not zeros
 	return frameStruct(s, 0, out.Bytes())
 }
 
@@ -191,8 +221,8 @@ func syntheticSyncProfileResult(s *nex.Settings, pid uint64, r *registeredProfil
 	out := nex.NewStreamOut(s)
 	out.PID(pid)
 	out.String(name)
-	out.Write(frameStruct(s, 0, nil)) // UnknownStruct1: empty-but-valid
-	out.QBuffer(nil)                 // qBuffer: empty
+	out.Write(frameStruct(s, 0, r.unk1Bytes())) // UnknownStruct1: real if we have it
+	out.QBuffer(r.miiBytes())                   // real Mii bytes if registered
 	out.U8(0)                        // unknown
 	out.String(country)
 	out.U8(0)       // unknown
@@ -203,12 +233,15 @@ func syntheticSyncProfileResult(s *nex.Settings, pid uint64, r *registeredProfil
 
 // smm2GetUsersFromProfiles answers get_users(48) using the registered-profile store.
 //
-// Only for resultOption==0xE284 do we serve the real registered profile: that's the
-// one option value we've confirmed (via measured_live.txt, several sessions) the
-// client accepts for this minimal [pid][code][name][zero tail] shape. Any other
-// resultOption (0x2284 in particular) gets the same all-zero response the known-stable
-// baseline used — 0 users — rather than risk the confirmed client-side communication
-// error that this same minimal shape triggers there.
+// Only for resultOption==0xE284 do we serve the real registered profile (with real Mii
+// bytes, since that's what actually lets the client accept "you have a Maker" — tested
+// and confirmed via a clean repro: 0xE284 with real Mii got far enough to render Course
+// World for a frame). Serving that SAME data for 0x2284 was tried and made things
+// worse — a graceful bounce-back to Mii creation became a hard communication error.
+// That rules out "0x2284 just needs the same data" — it needs a genuinely different,
+// larger structure (more resultOption bits = more populated fields = more wire bytes),
+// which we still don't have the documented layout for. Back to serving 0 users for
+// anything other than 0xE284, which is at least not a hard error.
 func smm2GetUsersFromProfiles(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
 	s := conn.Settings
 	pids := parseGetUsersPIDs(conn, req)
