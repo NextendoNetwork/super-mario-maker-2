@@ -85,12 +85,13 @@ func smm2DataStoreHandler() nex.RMCHandler {
 		// --- Dynamic profile: rewrite the measured identity to the connected account.
 		// get_users(48): one profile per requested pid (never the 261 measured users).
 		if req.Method == 48 {
-			if len(userInfoTemplate) > 0 {
-				return smm2GetUsers(conn, req)
-			}
-			// No byte-exact captured template loaded: use whatever the caller actually
-			// REGISTERED via RegisterUser(47) instead of always answering 0 users — this is
-			// what makes a Mii/name registration survive leaving and re-entering the game.
+			// ALWAYS use the registered-profile path, regardless of whether a captured
+			// measured/resp_0x73_m48.bin template happens to be loaded. smm2GetUsers (the
+			// template path) predates profiles.go entirely and has no idea it exists — it
+			// patches pid/code/name into a static captured tail and calls pseudoOr() for the
+			// name, ignoring anything RegisterUser(47) actually saved. Confirmed via
+			// measured_live.txt: the moment the template loaded this session, the response
+			// silently reverted to "Nextendo51966" instead of the real registered "Beer2".
 			return smm2GetUsersFromProfiles(conn, req)
 		}
 		// sync_user_profile(49): the OWN profile — patch pid + pseudo into the template.

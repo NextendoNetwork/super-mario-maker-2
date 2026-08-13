@@ -265,11 +265,16 @@ func syntheticSyncProfileResult(s *nex.Settings, pid uint64, r *registeredProfil
 
 // smm2GetUsersFromProfiles answers get_users(48) using the registered-profile store.
 //
-// Now serves the COMPLETE version-0 UserInfo (see syntheticUserInfoFromProfile) for
-// ANY resultOption, not just 0xE284. Earlier attempts to serve non-0xE284 options real
-// data used a TRUNCATED structure (stopped after the Mii bytes) and made things worse
-// (hard communication error) — but that was testing an incomplete shape, not the full
-// documented one. Worth retrying now that every field is actually present.
+// The requested pid doesn't always match conn.PID: for a username outside the
+// Nextendo account range (e.g. a raw small test number like "51966"), the CLIENT
+// queries itself using that raw number, while the SERVER registers/stores the
+// profile under conn.PID (the hashed anonymous identity resolveUser derived for it,
+// per main.go). Confirmed via measured_live.txt: RegisterUser succeeded and the
+// profile was in profiles.json, yet every single get_users afterward still answered
+// 0 users, because profiles.get(requestedPID) never matched what profiles.register
+// stored under conn.PID. When exactly one pid is requested and it doesn't match, also
+// try conn.PID — that covers the overwhelmingly common "check my own profile" case
+// without guessing at anyone else's identity.
 func smm2GetUsersFromProfiles(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
 	s := conn.Settings
 	pids := parseGetUsersPIDs(conn, req)
@@ -277,8 +282,15 @@ func smm2GetUsersFromProfiles(conn *nex.Connection, req *nex.RMCMessage) *nex.RM
 
 	var users [][]byte
 	for _, pid := range pids {
-		if r := profiles.get(pid); r != nil {
-			users = append(users, syntheticUserInfoFromProfile(s, pid, r))
+		r := profiles.get(pid)
+		lookupPID := pid
+		if r == nil && len(pids) == 1 && pid != conn.PID {
+			if r2 := profiles.get(conn.PID); r2 != nil {
+				r, lookupPID = r2, conn.PID
+			}
+		}
+		if r != nil {
+			users = append(users, syntheticUserInfoFromProfile(s, lookupPID, r))
 		}
 	}
 
