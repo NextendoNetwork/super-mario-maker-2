@@ -5,3 +5,10 @@
 cert.pem
 key.pem
 nextendo_secret.key
+smm2_objects/
+data/            # course blobs + catalog.json (live upload data — never commit)
+.env             # local secrets
+captured_live.txt
+measured_live.txt
+_tmp_*.py        # one-off analysis scripts
+_tmp_*.go

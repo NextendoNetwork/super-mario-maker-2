@@ -188,8 +188,13 @@ func smm2RegisterUser(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage
 
 // writeU8U32Map writes a NEX Map<Uint8, Uint32> — used for UserInfo's several stat
 // maps (play_stats, maker_stats, endless_challenge_high_scores, multiplayer_stats,
-// and the two still-unknown unk7/unk8/unk9 maps).
+// and the two still-unknown unk7/unk8/unk9 maps), and for CourseInfo's
+// play_stats/ratings/unk4/comment_stats. Pass nil for an empty map (writes U32(0)).
 func writeU8U32Map(out *nex.StreamOut, m map[uint8]uint32) {
+	if m == nil {
+		out.U32(0)
+		return
+	}
 	out.U32(uint32(len(m)))
 	for k, v := range m {
 		out.U8(k)

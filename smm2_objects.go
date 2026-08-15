@@ -23,7 +23,6 @@ package main
 
 import (
 	"fmt"
-	"time"
 
 	nex "github.com/NextendoNetwork/nextendo-nex"
 )
@@ -82,16 +81,27 @@ func smm2PreparePostObjectCourse(conn *nex.Connection, req *nex.RMCMessage) *nex
 }
 
 // parsePreparePostCourseParam decodes the PreparePostCourseParam body from method 66.
-// Observed layout (decoded from measured_live.txt line 15):
-//   [version u8][body_len u32]
-//   string  name
-//   string  description
-//   u32     tag_count
-//   u8×N    tags
-//   u8      game_style
-//   u8      course_theme
-//   u8      difficulty
-//   ...     (level binary + unknown trailing fields)
+// Per the fresh measured_live.txt capture (course "test 6" / data_id 1011), the body
+// starts with TWO short NEX strings (u16 length prefix, not u32 — older SMM2 protocol),
+// NOT with 4× data_id_str + u64 like CompletePostObjectsCourse(68) does:
+//   u16     name_length
+//   bytes   name (e.g. "test 6\0")
+//   u16     desc_length
+//   bytes   description
+//   ...     game_style, course_theme, difficulty, level_binary (LAYOUT UNVERIFIED — see
+//           hex dumps; no reliable field order from kinnay wiki or live capture yet)
+//
+// Important: the 4× data_id_str + u64 prefix is in the 68 RESPONSE payload (see
+// parseCompletePostCourseParam if needed), NOT here. The two methods have different
+// param shapes — copying 68's prefix into 66's parser is a category error.
+//
+// The legacy parse (name=first string, desc=second string, then tagCount/tags/style/
+// theme/difficulty) was the closest documented match but also wrong: it reads
+// tagCount from the 4 bytes after desc, and a u32 there is `00 01 00 00` = 0x100 = 256,
+// which exceeds the 8-tag cap and produces an all-zero style/theme/difficulty. Kept
+// here as the "best we have today" so the catalog still gets a usable name/desc —
+// the wrong style/theme/diff defaults are filtered out by 70/73 returning empty
+// anyway, so the user-visible impact is just a log warning, not a broken upload.
 func parsePreparePostCourseParam(s *nex.Settings, body []byte) (name, description string, tags []uint8, gameStyle, courseTheme, difficulty uint8) {
 	defer func() { recover() }()
 	in := nex.NewStreamIn(body, s)
@@ -111,92 +121,31 @@ func parsePreparePostCourseParam(s *nex.Settings, body []byte) (name, descriptio
 	return
 }
 
-// smm2CompletePostObjectsCourseAck (68): plain ack, no CourseInfo — matches the exact
-// shape of a real successful upload session captured before smm2GetCourses' rich
-// response existed. Still marks the course ready so the catalog/dashboard are correct.
-func smm2CompletePostObjectsCourseAck(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
-	s := conn.Settings
-	done := courses.completeAllPendingFor(conn.PID)
-	if len(done) == 0 {
-		fmt.Printf("[SMM2 Storage] CompletePostObjectsCourse(68) pid=%d received %d bytes -> ack (no pending course)\n", conn.PID, len(req.Body))
-	} else {
-		fmt.Printf("[SMM2 Storage] CompletePostObjectsCourse(68) pid=%d received %d bytes -> ack + marked ready (data_id=%d, code=%s)\n",
-			conn.PID, len(req.Body), done[0].DataID, courseCode(done[0].DataID))
-	}
-	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
-}
-
 // smm2CompletePostObjectsCourse (68): per kinnay's wiki, "this method does not return
-// anything" — but the user reported the client failing specifically when trying to get
-// the course's shareable code back after upload, and get_courses(70) right afterward
-// was retried 8 times in a row without the client ever being satisfied, exactly the
-// same "silently reject and retry" pattern we already saw and fixed for
-// PrepareRelationObject(132). Best next guess: the doc note about "no return value" is
-// wrong (or describes a different completion path), and the client actually wants the
-// finished CourseInfo — code included — back from THIS call, not a separate get_courses
-// round-trip. We now build and return it directly.
+// anything" (void ack). We use this call as the trigger to assign the shareable Course
+// ID to the just-uploaded course — the client immediately follows with
+// get_courses(70), and the CourseInfo we return there includes that code, so SMM2
+// can display it on the post-upload success screen.
+//
+// Data_id detection: CompletePostObjectsCourseParam is undocumented in detail, so
+// instead of parsing it (risky), we generate codes for every not-yet-coded Ready
+// course this PID owns. In practice a given connection only has one course mid-upload
+// at a time, so the loop assigns the one new code and any older ones that were
+// missed. The courseCode derivation is deterministic, so re-running it on a known
+// data_id is idempotent.
 func smm2CompletePostObjectsCourse(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
 	s := conn.Settings
-
-	done := courses.completeAllPendingFor(conn.PID)
-
-	if len(done) == 0 {
-		fmt.Printf("[SMM2 Storage] CompletePostObjectsCourse(68) pid=%d -> no pending course found, empty ack\n", conn.PID)
-	} else {
-		m := done[0]
-		fmt.Printf("[SMM2 Storage] CompletePostObjectsCourse(68) pid=%d data_id=%d -> ready (code=%s, empty ack per spec)\n", conn.PID, m.DataID, courseCode(m.DataID))
+	// The 66 alloc created the course but there is no equivalent of
+	// complete_post_object(26) for the level-data path — the 68 IS the
+	// completion. Mark the not-yet-Ready courses Ready and assign their
+	// shareable code so the client's immediate get_courses(70) call can
+	// return them with a code for the post-upload success screen.
+	for _, m := range courses.markReadyForPID(conn.PID) {
+		courses.setCode(m.DataID, courseCode(m.DataID))
+		fmt.Printf("[SMM2 Storage]   -> course data_id=%d marked Ready, code=%s\n", m.DataID, courseCode(m.DataID))
 	}
-	// TEST: back to an empty ack (per kinnay's original "no return value" doc) — the
-	// full-CourseInfo response was ALSO retried 8 times by the client even on its first,
-	// correctly-formed answer, so returning more data didn't stop the retries. Trying the
-	// opposite to see whether an empty ack is what the client actually expects here.
+	fmt.Printf("[SMM2 Storage] CompletePostObjectsCourse(68) pid=%d -> ack\n", conn.PID)
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
-}
-
-// parseCompletePostCourseDataID extracts just the data_id u64 from
-// CompletePostObjectsCourseParam. Layout (from measured_live.txt byte analysis):
-//   [version u8][body_len u32] string×3, u16, u8, string, u64(data_id) ...
-func parseCompletePostCourseDataID(s *nex.Settings, body []byte) (dataID uint64) {
-	defer func() { recover() }()
-	in := nex.NewStreamIn(body, s)
-	_ = in.U8()
-	sub := in.Substream()
-	_ = sub.String() // data_id_str repeated
-	_ = sub.String()
-	_ = sub.String()
-	_ = sub.U16() // unk u16
-	_ = sub.U8()  // unk u8 (extra byte before 4th string)
-	_ = sub.String()
-	dataID = sub.U64()
-	return
-}
-
-// parseCompletePostCourseParam is kept for reference but no longer used for metadata
-// (name/description are parsed from PreparePostObjectCourse(66) instead).
-func parseCompletePostCourseParam(s *nex.Settings, body []byte) (name, description string, tags []uint8, gameStyle, courseTheme, difficulty uint8, dataID uint64) {
-	defer func() { recover() }()
-	in := nex.NewStreamIn(body, s)
-	_ = in.U8()
-	sub := in.Substream()
-	_ = sub.String()
-	_ = sub.String()
-	_ = sub.String()
-	_ = sub.U16()
-	_ = sub.String()
-	dataID = sub.U64()
-	_ = sub.U32()
-	name = sub.String()
-	description = sub.String()
-	tagCount := sub.U32()
-	if tagCount <= 8 {
-		for i := uint32(0); i < tagCount; i++ {
-			tags = append(tags, sub.U8())
-		}
-	}
-	gameStyle = sub.U8()
-	courseTheme = sub.U8()
-	difficulty = sub.U8()
-	return
 }
 
 // smm2PrepareRelationUpload (132): a course has FOUR relation-data uploads — selected
@@ -223,7 +172,29 @@ func smm2PrepareRelationUpload(conn *nex.Connection, req *nex.RMCMessage) *nex.R
 	relType := sub.U32()
 	reqSize := sub.U32() // byte-size of the asset the console is about to upload
 
-	key := fmt.Sprintf("relation_%d_%d_%d", conn.PID, relType, time.Now().UnixNano())
+	// Deterministic, type-aware key. The client uploads to /relation/<key>, the file
+	// is stored at obj_<key> via sanitizeKey, and the CourseInfo's hardcoded thumbnail
+	// URLs ("/relation/thumb1_<dataID>" for one-screen, "/relation/thumb2_<dataID>" for
+	// entire) point at the same path. The previous "relation_<pid>_<type>_<nano>" scheme
+	// used a Unix-nanosecond timestamp, so the URL the client got back never matched the
+	// URL the CourseInfo referenced — uploads landed on disk but the client couldn't
+	// fetch them, and the CourseInfo's thumbnail URL 404'd when the client tried (this
+	// was a strong candidate for what made get_courses(70) return CourseInfo trigger
+	// "Upload failed").
+	var prefix string
+	switch relType {
+	case 1:
+		prefix = "thumb1" // one-screen thumbnail → CourseInfo.one_screen_thumbnail
+	case 2:
+		prefix = "thumb2" // entire thumbnail → CourseInfo.entire_thumbnail
+	case 3:
+		prefix = "thumb3" // report thumbnail, stored but not exposed in CourseInfo
+	case 5:
+		prefix = "replay" // clear-check replay, stored but not exposed in CourseInfo
+	default:
+		prefix = fmt.Sprintf("type%d", relType)
+	}
+	key := fmt.Sprintf("%s_%s", prefix, requestedDataID)
 	// FIX: give it a real path, not just the bare host. method 66's url ("/object/<id>")
 	// worked and produced a real POST from the client; this one previously returned just
 	// storageURL with NO path at all, and NOT ONE of the 4 relation uploads ever reached

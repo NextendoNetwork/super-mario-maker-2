@@ -63,6 +63,7 @@ type courseMeta struct {
 	Difficulty  uint8    `json:"difficulty"`
 	Size        uint32   `json:"size"`
 	Ready       bool     `json:"ready"` // set by complete_post_object
+	Code        string   `json:"code"`  // SMM2 Course ID, e.g. "ABCD-1234-EFGH-5678"
 	CreatedAt   int64    `json:"created_at"`
 }
 
@@ -151,33 +152,68 @@ func (c *courseStore) complete(dataID uint64, ok bool) {
 	c.persistLocked()
 }
 
-// completeAllPendingFor marks every not-yet-ready course owned by pid as ready and
-// returns them. Used by CompletePostObjectsCourse(68), whose real param we don't parse
-// (undocumented fields), so we can't pull out a specific data_id the way
-// complete_post_object(26) can — but in practice a given connection only ever has one
-// course mid-upload at a time, so marking all of that pid's pending courses ready is
-// equivalent. Returning them lets the caller build a real CourseInfo response instead
-// of an empty one.
-func (c *courseStore) completeAllPendingFor(pid uint64) []*courseMeta {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	var done []*courseMeta
-	for _, m := range c.byID {
-		if m.OwnerPID == pid && !m.Ready {
-			m.Ready = true
-			done = append(done, m)
-		}
-	}
-	if len(done) > 0 {
-		c.persistLocked()
-	}
-	return done
-}
-
 func (c *courseStore) get(dataID uint64) *courseMeta {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.byID[dataID]
+}
+
+// listReady returns a snapshot of every Ready course owned by `ownerPID`, sorted
+// newest first (by CreatedAt descending). Used by get_courses(70) to build the
+// CourseInfo list the client shows post-upload and in the maker UI.
+func (c *courseStore) listReady(ownerPID uint64) []*courseMeta {
+	c.mu.Lock()
+	ready := make([]*courseMeta, 0, len(c.byID))
+	for _, m := range c.byID {
+		if m.Ready && m.OwnerPID == ownerPID {
+			ready = append(ready, m)
+		}
+	}
+	c.mu.Unlock()
+	// Sort newest first (insertion sort, fine for the catalog sizes we expect).
+	for i := 1; i < len(ready); i++ {
+		for j := i; j > 0 && ready[j-1].CreatedAt < ready[j].CreatedAt; j-- {
+			ready[j-1], ready[j] = ready[j], ready[j-1]
+		}
+	}
+	return ready
+}
+
+// setCode assigns the shareable Course ID string ("XXXX-XXXX-XXXX-XXXX") that
+// SMM2 displays post-upload. Called from CompletePostObjectsCourse(68) once the
+// upload is confirmed; persisted so the code survives server restarts.
+func (c *courseStore) setCode(dataID uint64, code string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	m := c.byID[dataID]
+	if m == nil {
+		return
+	}
+	m.Code = code
+	c.persistLocked()
+}
+
+// markReadyForPID flips Ready=true on every not-yet-Ready course owned by ownerPID
+// and returns the list. Used by CompletePostObjectsCourse(68): the 66 alloc created
+// the course but there is no separate "complete" call for it (no equivalent of
+// complete_post_object(26) for the level-data path), so the 68 is the only place
+// to mark it Ready before the client's get_courses(70) call asks for the catalog.
+// All courses for this PID are flipped, not just the newest, so a stale entry from
+// a previous failed upload also gets cleaned up.
+func (c *courseStore) markReadyForPID(ownerPID uint64) []*courseMeta {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var updated []*courseMeta
+	for _, m := range c.byID {
+		if m.OwnerPID == ownerPID && !m.Ready {
+			m.Ready = true
+			updated = append(updated, m)
+		}
+	}
+	if len(updated) > 0 {
+		c.persistLocked()
+	}
+	return updated
 }
 
 // updateMeta writes the parsed name/description/tags/style/theme/difficulty from
