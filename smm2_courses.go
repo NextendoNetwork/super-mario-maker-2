@@ -35,49 +35,30 @@ func unixToDateTime(unix int64) uint64 {
 
 // courseCode derives the official SMM2-style Course ID from a data_id.
 //
-// Format: "XXX-XXX-XXX" (9 chars in 3 groups of 3, total 11 chars with dashes).
-// E.g. "9MV-B9V-5HG" — note: NOT hex. Uses a 30-char confusable-free alphabet:
+// Returns 9 RAW alphanumeric characters, NO dashes. Confirmed via a real "Upload
+// complete" screenshot: an earlier version returned "XXX-XXX-XXX" (dashes baked into
+// the string) and the client showed "000-13W--JV" — a double dash. The client inserts
+// its OWN dashes at positions 3/6 when displaying a 9-char code; we just need to hand
+// it 9 clean characters; it does the 3-3-3 formatting itself.
+//
+// Uses a 30-char confusable-free alphabet:
 //
 //	0123456789BCDFGHJKLMNPQRSTVWXY
 //
 // (omits A, E, I, O, U, Z because they look like 0/1/2/5/etc in SMM2's font).
-// Player-facing: the last 3 chars are a check-digit over the first 6, similar
-// to a credit card number. Without the real Nintendo checksum, "search by code"
-// in-game will reject our placeholder — but the post-upload display (which is
-// what we needed) shows the code as-is regardless.
-//
-// Encoding (placeholder): first 6 chars = mixed-radix base-30 of data_id
-// (mod 30^6), last 3 chars = simple Luhn-style check over the first 6 so a
-// single-typo code is detectable. Once we capture a real Nintendo code we can
-// swap in the real algorithm.
+// This is a deterministic placeholder derived from data_id, not Nintendo's real
+// checksum algorithm — "search by code" in-game would reject it, but the post-upload
+// display (which is what we needed) now shows it correctly formatted.
 func courseCode(dataID uint64) string {
 	const alpha = "0123456789BCDFGHJKLMNPQRSTVWXY"
 	const base = uint64(len(alpha)) // 30
-
-	// First 6 chars: data_id mod 30^6, encoded as 6 base-30 digits (MSB first).
-	var first6 [6]byte
-	v := dataID % (base * base * base * base * base * base)
-	for i := 5; i >= 0; i-- {
-		first6[i] = alpha[v%base]
-		v /= base
+	x := (dataID ^ 0xdeadbeefcafe1234) * 0xff51afd7ed558ccd
+	b := make([]byte, 9)
+	for i := range b {
+		b[i] = alpha[x%base]
+		x = x/base + 0x9e3779b97f4a7c15
 	}
-	// Last 3 chars: check digit. Simple weighted-sum mod 30 over the first 6,
-	// so any single-char typo in the first 6 is detectable in the check.
-	checksum := uint64(0)
-	for i, c := range first6 {
-		// Find the numeric index of the char in the alphabet.
-		var idx uint64
-		for j, a := range alpha {
-			if byte(a) == c {
-				idx = uint64(j)
-				break
-			}
-		}
-		checksum = (checksum*31 + idx + uint64(i)) % (base * base * base)
-	}
-	last3 := [3]byte{alpha[checksum/base/base%base], alpha[checksum/base%base], alpha[checksum%base]}
-
-	return string(first6[:]) + "-" + string(last3[:])
+	return string(b)
 }
 
 // --- Substructure types implementing nex.Structure --------------------------
@@ -144,12 +125,20 @@ func writeCourseTimeStats(out *nex.StreamOut) {
 }
 
 // writeRelationObjectReqGetInfo writes a RelationObjectReqGetInfo per
-// NintendoClients:2544. url="" + data_type=0 produces a valid empty descriptor
-// (the client treats it as "no thumbnail available"). filename is the last
-// path segment of url, or "" when url is empty.
+// NintendoClients:2544. dataType=0 when there's no real url (empty string) — that's
+// the "no thumbnail available" sentinel. When we DO have a real thumbnail on disk,
+// dataType must be nonzero (1) or the client apparently treats data_type==0 as "no
+// thumbnail" regardless of the URL/size being populated, and never even attempts the
+// HTTP GET — a real capture confirmed the URL+size were byte-perfect (114688, matching
+// the file on disk exactly) yet nothing rendered client-side, with data_type hardcoded
+// to 0 unconditionally.
 func writeRelationObjectReqGetInfo(out *nex.StreamOut, url string, size uint32) {
+	dataType := uint8(0)
+	if url != "" {
+		dataType = 1
+	}
 	out.Add(&relationObjectReqGetInfoOut{
-		url: url, dataType: 0, size: size, unk: nil,
+		url: url, dataType: dataType, size: size, unk: nil,
 		filename: filenameFromURL(url),
 	})
 }
@@ -158,20 +147,46 @@ func writeRelationObjectReqGetInfo(out *nex.StreamOut, url string, size uint32) 
 // (dataID, relType) — used to populate RelationObjectReqGetInfo.size with the real
 // upload size, not a hardcoded guess. Returns 0 if the file is missing.
 func relationSizeOnDisk(dataID uint64, relType uint32) uint32 {
-	var name string
-	switch relType {
-	case 1:
-		name = "obj_thumb1_" + strconv.FormatUint(dataID, 10)
-	case 2:
-		name = "obj_thumb2_" + strconv.FormatUint(dataID, 10)
-	default:
-		return 0
-	}
-	st, err := os.Stat(filepath.Join(storageDir, name))
+	st, err := os.Stat(filepath.Join(storageDir, relationFileName(dataID, relType)))
 	if err != nil {
 		return 0
 	}
 	return uint32(st.Size())
+}
+
+// relationFileName returns the on-disk filename for a relation blob, matching
+// smm2_objects.go's PrepareRelationUpload key scheme ("thumb1_<id>" etc, sanitized
+// with an "obj_" prefix by sanitizeKey in smm2_storage.go).
+func relationFileName(dataID uint64, relType uint32) string {
+	switch relType {
+	case 1:
+		return "obj_thumb1_" + strconv.FormatUint(dataID, 10)
+	case 2:
+		return "obj_thumb2_" + strconv.FormatUint(dataID, 10)
+	default:
+		return ""
+	}
+}
+
+// relationBytesOnDisk reads a relation blob's content from disk, or nil if missing
+// or too large to embed. Used to test the hypothesis that CourseInfo.unk3 (an unused
+// "bytes" field per NintendoClients — we'd been sending it empty the whole time) is
+// actually meant to carry a small embedded thumbnail directly in the CourseInfo
+// response, rather than the client fetching one_screen/entire_thumbnail over a
+// separate HTTP GET — which, per real captures, the client NEVER attempts even with a
+// fully correct RelationObjectReqGetInfo (right URL, right size, data_type=1, and
+// method 134 answered successfully). A max size guards against embedding something
+// absurdly large into a QBuffer (u16 length prefix, 65535-byte ceiling).
+func relationBytesOnDisk(dataID uint64, relType uint32, maxSize int) []byte {
+	name := relationFileName(dataID, relType)
+	if name == "" {
+		return nil
+	}
+	b, err := os.ReadFile(filepath.Join(storageDir, name))
+	if err != nil || len(b) > maxSize {
+		return nil
+	}
+	return b
 }
 
 // buildCourseInfo serialises a courseMeta to a framed CourseInfo per the
@@ -218,7 +233,14 @@ func buildCourseInfo(s *nex.Settings, m *courseMeta) []byte {
 	out.U32(0)                         // clear_condition
 	out.U16(0)                         // clear_condition_magnitude
 	out.U16(0)                         // unk2
-	out.QBuffer(nil)                   // unk3
+	// unk3: TESTED AND REVERTED. Tried embedding the small entire_thumbnail (thumb2)
+	// directly here as a hypothesis for how the client shows thumbnails without ever
+	// issuing an HTTP GET for one_screen/entire_thumbnail (confirmed real JPEG bytes
+	// landed in the wire — response size correctly grew to ~42KB for 15 courses — but
+	// thumbnails still didn't render). Reverted to empty: no confirmed benefit, and it
+	// was pure overhead (up to ~40KB per course) otherwise. This is now a known
+	// limitation with no further untested, well-reasoned hypothesis — see memory notes.
+	out.QBuffer(nil)
 	writeU8U32Map(out, nil)            // play_stats
 	writeU8U32Map(out, nil)            // ratings
 	writeU8U32Map(out, nil)            // unk4
@@ -280,5 +302,52 @@ func smm2GetCourses(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
 	}
 
 	fmt.Printf("[SMM2 Courses] get_courses(70) pid=%d requested=%d found=%d\n", conn.PID, len(dataIDs), len(infos))
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
+}
+
+// smm2SearchCoursesLatest handles search_courses_latest(73) — "New Courses" in
+// Course World. Per NintendoClients: SearchCoursesLatestParam{option, range}, response
+// courses: list[CourseInfo], result: bool. Global browsing (every uploaded course,
+// not just conn.PID's own), newest first — same buildCourseInfo used everywhere else,
+// now confirmed working (real Course ID showed on a live "Upload complete" screen).
+func smm2SearchCoursesLatest(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
+	s := conn.Settings
+	// Not parsing option/range: SearchCoursesLatestParam's range is a pagination
+	// window (offset/size) we don't need yet at this catalog size — return newest 100.
+	list := courses.listAllReady(100)
+
+	out := nex.NewStreamOut(s)
+	out.U32(uint32(len(list))) // list<CourseInfo>
+	for _, m := range list {
+		out.Write(buildCourseInfo(s, m))
+	}
+	out.Bool(true) // result
+
+	fmt.Printf("[SMM2 Courses] search_courses_latest(73) pid=%d -> %d course(s)\n", conn.PID, len(list))
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
+}
+
+// smm2GetReqGetInfoHeadersInfo handles get_req_get_info_headers_info(134). Per
+// NintendoClients: takes a single "type" byte (matching RelationObjectReqGetInfo's
+// data_type — the client sent 1 for our one_screen/entire thumbnails right after the
+// data_type=1 fix), returns ReqGetInfoHeadersInfo{headers: list[DataStoreKeyValue],
+// expiration: int}. This was completely unimplemented (falling to NotFound, showing
+// as "S->C 0x73.0" in logs — an error response has no method field) — the client
+// calls it as part of fetching a relation object (thumbnail) and, without a successful
+// answer here, apparently never proceeds to the actual HTTP GET. Our own object store
+// needs no special headers for a GET, so an empty header list + a far-future
+// expiration is a valid, safe answer.
+func smm2GetReqGetInfoHeadersInfo(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
+	s := conn.Settings
+	var reqType uint8
+	if len(req.Body) > 0 {
+		reqType = req.Body[0]
+	}
+
+	out := nex.NewStreamOut(s)
+	writeKeyValueList(out, nil) // headers: none needed for our own object store
+	out.U32(0x7FFFFFFF)         // expiration: far future (we don't expire GET access)
+
+	fmt.Printf("[SMM2 Courses] get_req_get_info_headers_info(134) pid=%d type=%d -> empty headers, no expiration\n", conn.PID, reqType)
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
 }

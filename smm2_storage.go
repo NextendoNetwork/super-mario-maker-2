@@ -102,6 +102,7 @@ func (c *courseStore) load() {
 	}
 	fmt.Printf("[SMM2 Storage] catalogue chargé: %d cours, nextID=%d, dir=%s, url=%s\n",
 		len(c.byID), c.nextID, storageDir, storageURL)
+	c.migrateFlatLayout()
 }
 
 // persist writes the catalog back to disk (called under lock).
@@ -179,6 +180,29 @@ func (c *courseStore) listReady(ownerPID uint64) []*courseMeta {
 	return ready
 }
 
+// listAllReady returns every Ready course from every owner, newest first — used
+// by search_courses_latest(73) ("New Courses" in Course World), which is global
+// browsing, not scoped to the requesting player like listReady/listByOwner are.
+func (c *courseStore) listAllReady(limit int) []*courseMeta {
+	c.mu.Lock()
+	ready := make([]*courseMeta, 0, len(c.byID))
+	for _, m := range c.byID {
+		if m.Ready {
+			ready = append(ready, m)
+		}
+	}
+	c.mu.Unlock()
+	for i := 1; i < len(ready); i++ {
+		for j := i; j > 0 && ready[j-1].CreatedAt < ready[j].CreatedAt; j-- {
+			ready[j-1], ready[j] = ready[j], ready[j-1]
+		}
+	}
+	if limit > 0 && len(ready) > limit {
+		ready = ready[:limit]
+	}
+	return ready
+}
+
 // setCode assigns the shareable Course ID string ("XXXX-XXXX-XXXX-XXXX") that
 // SMM2 displays post-upload. Called from CompletePostObjectsCourse(68) once the
 // upload is confirmed; persisted so the code survives server restarts.
@@ -246,7 +270,132 @@ func (c *courseStore) setSize(dataID uint64, size uint32) {
 	}
 }
 
-func blobPath(dataID uint64) string { return filepath.Join(storageDir, strconv.FormatUint(dataID, 10)+".bin") }
+func blobPath(dataID uint64) string { return filepath.Join(courseDir(dataID), "level.bin") }
+
+// --- Per-course file layout ------------------------------------------------------
+//
+// Everything about one course now lives under its own folder instead of being
+// scattered flat across storageDir with ad-hoc prefixes ("obj_thumb1_<id>",
+// "<id>.bin", ...) built independently in three different files. One source of
+// truth here; smm2_objects.go (upload) and smm2_courses.go (CourseInfo/read) both
+// call into it instead of re-deriving names themselves.
+//
+//   data/
+//     catalog.json
+//     profiles.json
+//     courses/
+//       <dataID>/
+//         level.bin
+//         thumb1.jpg   (one_screen_thumbnail, relType 1)
+//         thumb2.jpg   (entire_thumbnail,     relType 2)
+//         thumb3.jpg   (report thumbnail,      relType 3)
+//         replay.bin   (clear-check replay,    relType 5)
+
+// courseDir returns the per-course directory (not guaranteed to exist yet).
+func courseDir(dataID uint64) string {
+	return filepath.Join(storageDir, "courses", strconv.FormatUint(dataID, 10))
+}
+
+// relationBaseName maps a PrepareRelationUpload "type" to its filename within a
+// course's directory. Returns "" for an unrecognized type.
+func relationBaseName(relType uint32) string {
+	switch relType {
+	case 1:
+		return "thumb1.jpg"
+	case 2:
+		return "thumb2.jpg"
+	case 3:
+		return "thumb3.jpg"
+	case 5:
+		return "replay.bin"
+	default:
+		return ""
+	}
+}
+
+// relationPath returns the on-disk path for a course's relation blob, or "" if
+// relType is unrecognized.
+func relationPath(dataID uint64, relType uint32) string {
+	name := relationBaseName(relType)
+	if name == "" {
+		return ""
+	}
+	return filepath.Join(courseDir(dataID), name)
+}
+
+// relationKey returns the "/relation/<key>" URL key for a course's relation blob —
+// used both when building the upload URL (smm2PrepareRelationUpload) and when
+// parsing an incoming request back into (dataID, relType) in relationHandler.
+func relationKey(dataID uint64, relType uint32) string {
+	return fmt.Sprintf("%d/%d", dataID, relType)
+}
+
+// parseRelationKey parses a "<dataID>/<relType>" key. ok is false if the key isn't
+// in that shape (e.g. a stale key from before this layout, still in flight).
+func parseRelationKey(key string) (dataID uint64, relType uint32, ok bool) {
+	parts := strings.SplitN(key, "/", 2)
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+	id, err1 := strconv.ParseUint(parts[0], 10, 64)
+	typ, err2 := strconv.ParseUint(parts[1], 10, 32)
+	if err1 != nil || err2 != nil {
+		return 0, 0, false
+	}
+	return id, uint32(typ), true
+}
+
+// contentTypeForPath derives a Content-Type from a stored file's extension — the
+// thumbnails are real JPEGs (confirmed: raw ffd8ffe0... JFIF bytes in every capture),
+// the replay isn't an image, so it keeps the generic type.
+func contentTypeForPath(path string) string {
+	if strings.HasSuffix(path, ".jpg") {
+		return "image/jpeg"
+	}
+	return "application/octet-stream"
+}
+
+// migrateFlatLayout moves any pre-reorg files (top-level "<id>.bin" and
+// "obj_thumb1_<id>" etc, one flat pile in storageDir) into the new courses/<id>/
+// structure, for every course already in the catalog. Safe to run every startup:
+// only touches an old path that still exists and only when the new path doesn't
+// exist yet, so it's a no-op once everything's migrated. This is what lets the
+// reorganization ship without re-uploading every course already on disk.
+func (c *courseStore) migrateFlatLayout() {
+	legacyRelNames := map[uint32]string{1: "obj_thumb1_", 2: "obj_thumb2_", 3: "obj_thumb3_", 5: "obj_replay_"}
+	moved := 0
+	for id := range c.byID {
+		idStr := strconv.FormatUint(id, 10)
+		newDir := courseDir(id)
+
+		old := filepath.Join(storageDir, idStr+".bin")
+		newP := filepath.Join(newDir, "level.bin")
+		if fileExists(old) && !fileExists(newP) {
+			_ = os.MkdirAll(newDir, 0o755)
+			if os.Rename(old, newP) == nil {
+				moved++
+			}
+		}
+		for relType, prefix := range legacyRelNames {
+			old := filepath.Join(storageDir, prefix+idStr)
+			newP := relationPath(id, relType)
+			if fileExists(old) && !fileExists(newP) {
+				_ = os.MkdirAll(newDir, 0o755)
+				if os.Rename(old, newP) == nil {
+					moved++
+				}
+			}
+		}
+	}
+	if moved > 0 {
+		fmt.Printf("[SMM2 Storage] migration: %d fichier(s) déplacé(s) vers courses/<id>/\n", moved)
+	}
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
 
 // startStorageServer serves blob PUT/POST/GET over HTTPS on storagePort.
 func startStorageServer() {
@@ -301,6 +450,11 @@ func objectHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "bad body", http.StatusBadRequest)
 			return
 		}
+		if err := os.MkdirAll(courseDir(dataID), 0o755); err != nil {
+			fmt.Printf("[SMM2 Storage] PUT %d FAILED (mkdir): %v\n", dataID, err)
+			http.Error(w, "store failed", http.StatusInternalServerError)
+			return
+		}
 		if err := os.WriteFile(blobPath(dataID), body, 0o644); err != nil {
 			fmt.Printf("[SMM2 Storage] PUT %d FAILED: %v\n", dataID, err)
 			http.Error(w, "store failed", http.StatusInternalServerError)
@@ -329,14 +483,25 @@ func objectHandler(w http.ResponseWriter, r *http.Request) {
 
 // relationHandler stores relation-object blobs (thumbnails + clear-check replay)
 // sent by the console to the URL returned by PreparePostRelationObject(132).
-// The URL path is /relation/<key> and the body is the same multipart/form-data
-// envelope used for /object/ uploads (a "file" part carrying the raw blob).
-// On success we reply 204 with an ETag like S3 does.
+// The URL path is /relation/<dataID>/<relType> (see relationKey/parseRelationKey in
+// smm2_storage.go) and the body is the same multipart/form-data envelope used for
+// /object/ uploads. On success we reply 204 with an ETag like S3 does.
 func relationHandler(w http.ResponseWriter, r *http.Request) {
 	key := strings.TrimPrefix(r.URL.Path, "/relation/")
 	if key == "" {
 		http.Error(w, "missing key", http.StatusBadRequest)
 		return
+	}
+
+	dataID, relType, ok := parseRelationKey(key)
+	var path string
+	if ok {
+		path = relationPath(dataID, relType)
+	}
+	if path == "" {
+		// Fallback for a key in the OLD flat "prefix_dataID" shape, still in flight from
+		// before this reorg (e.g. a request queued client-side across a server restart).
+		path = filepath.Join(storageDir, sanitizeKey(key))
 	}
 
 	switch r.Method {
@@ -347,8 +512,12 @@ func relationHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "bad body", http.StatusBadRequest)
 			return
 		}
-		name := sanitizeKey(key)
-		if err := os.WriteFile(filepath.Join(storageDir, name), blob, 0o644); err != nil {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			fmt.Printf("[SMM2 Storage] relation %s STORE FAIL (mkdir): %v\n", key, err)
+			http.Error(w, "store failed", http.StatusInternalServerError)
+			return
+		}
+		if err := os.WriteFile(path, blob, 0o644); err != nil {
 			fmt.Printf("[SMM2 Storage] relation %s STORE FAIL: %v\n", key, err)
 			http.Error(w, "store failed", http.StatusInternalServerError)
 			return
@@ -357,16 +526,15 @@ func relationHandler(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("ETag", fmt.Sprintf("%q", hex.EncodeToString(sum[:])))
 		w.Header().Set("Server", "AmazonS3")
 		w.Header().Set("x-amz-request-id", "NEXTENDO0000000000")
-		fmt.Printf("[SMM2 Storage] relation %s <- %d bytes (etag=%x)\n", key, len(blob), sum[:4])
+		fmt.Printf("[SMM2 Storage] relation %s <- %d bytes (etag=%x, path=%s)\n", key, len(blob), sum[:4], path)
 		w.WriteHeader(http.StatusNoContent) // 204, like S3
 	case http.MethodGet, http.MethodHead:
-		name := sanitizeKey(key)
-		b, err := os.ReadFile(filepath.Join(storageDir, name))
+		b, err := os.ReadFile(path)
 		if err != nil {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
-		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Type", contentTypeForPath(path))
 		w.Header().Set("Content-Length", strconv.Itoa(len(b)))
 		if r.Method == http.MethodGet {
 			w.Write(b)

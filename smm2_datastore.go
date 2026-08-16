@@ -36,7 +36,8 @@ var smm2EmptyBuilders = map[uint32]func(*nex.StreamOut){
 	// Kept out of smm2EmptyBuilders because the response needs conn.PID to filter
 	// the catalog — a stateless builder can't do that.
 	71: func(o *nex.StreamOut) { o.U32(0); o.U32(0); o.Bool(true) }, // point_ranking: courses[], ranks[], result
-	73: func(o *nex.StreamOut) { o.U32(0); o.Bool(true) },        // search_courses_latest: courses[], result
+	// 73 (search_courses_latest / "New Courses"): wired to smm2SearchCoursesLatest
+	// in the switch below, now that CourseInfo is confirmed working.
 	74: func(o *nex.StreamOut) { o.U32(0); o.Bool(true) },        // search_courses_posted_by
 	75: func(o *nex.StreamOut) { o.U32(0) },                      // search_courses_positive_rated_by
 	76: func(o *nex.StreamOut) { o.U32(0) },                      // search_courses_played_by
@@ -171,21 +172,28 @@ func smm2DataStoreHandler() nex.RMCHandler {
 			// shape (smm2_objects.go), not a patched Copilot-generated blob.
 			return smm2PreparePostObjectCourse(conn, req)
 		case 68:
-			// CompletePostObjectsCourse: ack with no return value (kinnay "void"). The
-			// shareable Course ID is intentionally not returned here — every CourseInfo
-			// shape we tried (full, lite++, Result(code)) made the client show
-			// "Upload failed", so 68/70/73 all stay empty. Client completes the upload
-			// handshake and displays "Upload complete." with the Course ID field blank.
+			// CompletePostObjectsCourse: ack with no return value (kinnay "void") — confirmed
+			// correct: the real Course ID comes back via get_courses(70)'s CourseInfo.code,
+			// not from here.
 			return smm2CompletePostObjectsCourse(conn, req)
 		case 69:
 			// UpdateCourseTag: per spec, no return value.
 			return smm2UpdateCourseTag(conn, req)
 		case 70:
-			// get_courses: list<CourseInfo> + list<result>. The CourseInfo.code field
-			// is what SMM2 shows as "Course ID" on the post-upload success screen —
-			// without it (or with a real CourseInfo in the list), the client shows
-			// "Course ID: " in blank. Per NintendoClients/datastore_smm2.py:2158.
+			// get_courses: list<CourseInfo> + list<result>. CONFIRMED WORKING via a real
+			// "Upload complete. Course ID: XXX-XXX-XXX" screen after fixing 3 concrete bugs
+			// (request not parsed, CourseInfo double-buffered, empty results list).
 			return smm2GetCourses(conn, req)
+		case 73:
+			// search_courses_latest: "New Courses" tab, global across all uploaders.
+			return smm2SearchCoursesLatest(conn, req)
+		case 134:
+			// get_req_get_info_headers_info: the client calls this before actually
+			// fetching a relation object (thumbnail) over HTTP — confirmed via a real
+			// capture, it was previously falling through to NotFound (unimplemented),
+			// and the thumbnails never rendered even though the URL/size/data_type
+			// were all correct.
+			return smm2GetReqGetInfoHeadersInfo(conn, req)
 		case 132:
 			// Relation-data upload prep (thumbnails + clear-check): a fresh
 			// RelationObjectReqPostInfo per call, built from the documented shape.
