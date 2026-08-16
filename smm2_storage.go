@@ -229,6 +229,23 @@ func (c *courseStore) listAllReady(limit int) []*courseMeta {
 	return ready
 }
 
+// listAllReadyPaginated returns a page of Ready courses (newest first), starting
+// at byte offset `offset` with up to `limit` results, plus the total count of all
+// Ready courses. Used by method 72 (third Course World tab) which sends explicit
+// offset/limit in its 47-byte request body (body[8]=offset, body[12]=limit).
+func (c *courseStore) listAllReadyPaginated(offset, limit int) ([]*courseMeta, int) {
+	all := c.listAllReady(0) // 0 = no cap, get everything to sort
+	total := len(all)
+	if offset >= total {
+		return []*courseMeta{}, total
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	return all[offset:end], total
+}
+
 // listAllReadyByHotness returns every Ready course from every owner, sorted by a
 // simple "hotness" score (likes + hearts + plays, descending), newest as tiebreaker.
 // Used by the undocumented method 84 ("Hot Courses" in Course World) — not in the

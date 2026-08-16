@@ -429,37 +429,47 @@ func smm2SearchCoursesHot(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMes
 // Course World tab (between "New" and "Hot"). Same response shape as 73/74:
 // list<CourseInfo> + bool result.
 //
-// NOT documented in NintendoClients (same undocumented territory as 58/72/83/84,
-// all of which populate the Course World Hub). Observed in a real capture
-// (call=120, len=52): the request body has 47 unknown bytes — u32 bitmask
-// (0x1ff?), u32 count_limit (100), u8 filter (4), u32 unk (0xffff), u32
-// bitmask_len (16), a 16-byte bitmask (0x01..0x0f), and 3 trailing u8s (0,1,4).
-// Best guess: a "by tag / by region / by skill level" filter we don't act on.
+// NOT documented in NintendoClients (same undocumented territory as 58/83/84,
+// all of which populate the Course World Hub). Live capture of two consecutive
+// page requests (47-byte body):
+//   body[8]  = u8  offset  (0x00 → 0x64 between pages = 0 → 100)
+//   body[12] = u8  limit   (0x64 = 100, constant)
+// All other body bytes are filter/tag bitmasks, constant between requests.
 //
-// For now we ignore the filter fields and return ALL Ready courses sorted
-// by created_at desc (same as search_courses_latest(73) — "newest first"),
-// with a hard cap of 100. If the user later wants a different sort or
-// real filter handling, the shape to change is one line: `list := courses.XXX(100)`.
+// Pagination: client sends offset=0,limit=100 for first page, then
+// offset=100,limit=100 for next, and so on. Server returns the page and a
+// trailing bool: false = "has more pages", true = "last page" (inverted from
+// the hasMore logic so the server returns bool=false when more exist).
 //
 // Previously a stub returning `u32 0; u8 true` — the tab always showed nothing
 // (no error, just no courses). Now wired with real data.
 func smm2SearchCoursesByMethod72(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
 	s := conn.Settings
-	// Consume the unknown request body to keep the stream aligned.
 	in := nex.NewStreamIn(req.Body, s)
-	_ = in.U8() // param struct version
-	_ = in.Substream() // unknown shape, just consume
+	_ = in.U8() // param struct version (0x01)
+	_ = in.Substream() // consume the rest, keep stream aligned
 
-	list := courses.listAllReady(100) // same helper as 73, newest first
+	// req.Body layout: [u8 ver][u32 sub_len][47 bytes payload]
+	// payload[8] = u8 offset (0→100→200...), payload[12] = u8 limit (0x64=100)
+	payload := req.Body[5:]
+	offset := int(payload[8])
+	limit := int(payload[12])
+	if limit == 0 {
+		limit = 100 // safety default
+	}
+
+	list, total := courses.listAllReadyPaginated(offset, limit)
+	hasMore := (offset + len(list)) < total
 
 	out := nex.NewStreamOut(s)
 	out.U32(uint32(len(list)))
 	for _, m := range list {
 		out.Write(buildCourseInfo(s, m))
 	}
-	out.Bool(true)
+	out.Bool(!hasMore) // bool=false means "more pages exist" (inverted)
 
-	fmt.Printf("[SMM2 Courses] search_courses_method72(72) pid=%d -> %d course(s) newest first\n", conn.PID, len(list))
+	fmt.Printf("[SMM2 Courses] search_courses_method72(72) pid=%d offset=%d limit=%d -> %d course(s) [total=%d, has_more=%v]\n",
+		conn.PID, offset, limit, len(list), total, hasMore)
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
 }
 
