@@ -23,6 +23,8 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"strconv"
 
 	nex "github.com/NextendoNetwork/nextendo-nex"
 )
@@ -140,9 +142,19 @@ func smm2CompletePostObjectsCourse(conn *nex.Connection, req *nex.RMCMessage) *n
 	// completion. Mark the not-yet-Ready courses Ready and assign their
 	// shareable code so the client's immediate get_courses(70) call can
 	// return them with a code for the post-upload success screen.
-	for _, m := range courses.markReadyForPID(conn.PID) {
+	ready := courses.markReadyForPID(conn.PID)
+	for _, m := range ready {
 		courses.setCode(m.DataID, courseCode(m.DataID))
-		fmt.Printf("[SMM2 Storage]   -> course data_id=%d marked Ready, code=%s\n", m.DataID, courseCode(m.DataID))
+		// Mirror into the per-profile registry so UserInfo.maker_stats and
+		// SearchCoursesPostedBy(74) see the new upload without waiting for
+		// the next restart. recordUpload is a no-op for an unregistered PID
+		// and idempotent on already-counted data_ids.
+		if profiles.recordUpload(conn.PID, m.DataID) {
+			fmt.Printf("[SMM2 Storage]   -> course data_id=%d marked Ready, code=%s, profile uploaded_count=%d\n",
+				m.DataID, courseCode(m.DataID), profiles.get(conn.PID).UploadedCount)
+		} else {
+			fmt.Printf("[SMM2 Storage]   -> course data_id=%d marked Ready, code=%s\n", m.DataID, courseCode(m.DataID))
+		}
 	}
 	fmt.Printf("[SMM2 Storage] CompletePostObjectsCourse(68) pid=%d -> ack\n", conn.PID)
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
@@ -172,35 +184,28 @@ func smm2PrepareRelationUpload(conn *nex.Connection, req *nex.RMCMessage) *nex.R
 	relType := sub.U32()
 	reqSize := sub.U32() // byte-size of the asset the console is about to upload
 
-	// Deterministic, type-aware key. The client uploads to /relation/<key>, the file
-	// is stored at obj_<key> via sanitizeKey, and the CourseInfo's hardcoded thumbnail
-	// URLs ("/relation/thumb1_<dataID>" for one-screen, "/relation/thumb2_<dataID>" for
-	// entire) point at the same path. The previous "relation_<pid>_<type>_<nano>" scheme
-	// used a Unix-nanosecond timestamp, so the URL the client got back never matched the
-	// URL the CourseInfo referenced — uploads landed on disk but the client couldn't
-	// fetch them, and the CourseInfo's thumbnail URL 404'd when the client tried (this
-	// was a strong candidate for what made get_courses(70) return CourseInfo trigger
-	// "Upload failed").
-	var prefix string
-	switch relType {
-	case 1:
-		prefix = "thumb1" // one-screen thumbnail → CourseInfo.one_screen_thumbnail
-	case 2:
-		prefix = "thumb2" // entire thumbnail → CourseInfo.entire_thumbnail
-	case 3:
-		prefix = "thumb3" // report thumbnail, stored but not exposed in CourseInfo
-	case 5:
-		prefix = "replay" // clear-check replay, stored but not exposed in CourseInfo
-	default:
-		prefix = fmt.Sprintf("type%d", relType)
+	// Key scheme: "<dataID>/<relType>" — matched by parseRelationKey on the upload side
+	// AND by the CourseInfo thumbnail URL on the download side. Both sides reach the same
+	// file on disk (relationPath), so a successful upload is fetchable without a second
+	// URL translation.
+	//
+	// EARLIER, this method used "thumb1_<dataID>" etc. — which parseRelationKey rejected
+	// (it expects exactly "<id>/<relType>"), so relationHandler fell through to a legacy
+	// sanitizeKey("thumb1_<dataID>") = "obj_thumb1_<dataID>" path, and the GET side answered
+	// octet-stream because contentTypeForPath looks at the .jpg extension that path didn't
+	// have. Switching to the numeric key format writes the new files at the right path
+	// directly, and the existing migrateFlatLayout will sweep the legacy stragglers
+	// (including any uploaded before this change, like course 1019) into the new layout on
+	// the next server start.
+	dataID, errParse := strconv.ParseUint(requestedDataID, 10, 64)
+	if errParse != nil || relationPath(dataID, relType) == "" {
+		// Unknown relType or unparseable data_id — answer an error so the client stops
+		// retrying, rather than build a URL we couldn't serve.
+		fmt.Printf("[SMM2 Storage] PreparePostRelationObject(132) data_id=%q type=%d -> RELATION TYPE NO SOPORTADO (pid=%d)\n",
+			requestedDataID, relType, conn.PID)
+		return nex.NewRMCError(s, 0x73, req.CallID, 0x80690004) // DataStore::NotFound
 	}
-	key := fmt.Sprintf("%s_%s", prefix, requestedDataID)
-	// FIX: give it a real path, not just the bare host. method 66's url ("/object/<id>")
-	// worked and produced a real POST from the client; this one previously returned just
-	// storageURL with NO path at all, and NOT ONE of the 4 relation uploads ever reached
-	// our HTTP server (confirmed: zero "[SMM2 Storage] <-" log lines for any of them,
-	// across repeated client retries) — consistent with the client failing to build a
-	// valid request from a path-less URL before it ever leaves the console.
+	key := relationKey(dataID, relType) // "<dataID>/<relType>"
 	url := fmt.Sprintf("%s/relation/%s", storageURL, key)
 
 	body := nex.NewStreamOut(s)
@@ -285,15 +290,58 @@ func smm2PrepareGetObject(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMes
 	dataID := p.U64()
 
 	if m := courses.get(dataID); m != nil {
+		// SOURCE OF TRUTH = on-disk file size, NOT m.Size. m.Size comes from
+		// setSize, which fires at PUT time. If a course blob is replaced on disk
+		// by any path that doesn't go through objectHandler (manual copy, sync
+		// from another host, second PUT that errored before setSize ran, etc.),
+		// m.Size becomes stale and the response here advertises a wrong size.
+		// The SMM2 client then tries to download exactly that many bytes (or
+		// trust the Content-Length mismatch) and the course refuses to load —
+		// a real capture showed data_id=1008 served with size=1472 while
+		// level.bin was 376832 bytes on disk, and the client fell off before
+		// the play screen.
+		//
+		// We stat the file directly. If the size differs from m.Size we update
+		// m.Size (and persist the catalog) so the next caller gets the right
+		// value without a re-stat, and the on-disk content is what's served.
+		diskSize := uint32(0)
+		statErr := error(nil)
+		if st, err := os.Stat(blobPath(dataID)); err == nil {
+			diskSize = uint32(st.Size())
+		} else {
+			statErr = err
+		}
+		fmt.Printf("[SMM2 Storage] prepare_get(25) data_id=%d m.Size=%d diskSize=%d path=%s statErr=%v\n",
+			dataID, m.Size, diskSize, blobPath(dataID), statErr)
+		if diskSize != m.Size {
+			courses.setSize(dataID, diskSize) // persists; updates in-memory m.Size too
+			m.Size = diskSize
+		}
+
 		url := fmt.Sprintf("%s/object/%d", storageURL, dataID)
 		body := nex.NewStreamOut(s)
 		body.String(url)             // url
 		writeKeyValueList(body, nil) // headers: none
 		body.U32(m.Size)             // size
+		// root_ca_cert is a Buffer (u32 length prefix + bytes) per
+		// NintendoClients/datastore.py DataStoreReqGetInfo.load — matches
+		// what methods 24/66/132 already emit. Earlier versions wrote
+		// QBuffer (u16) here, which made the client parse the first 2
+		// bytes of the dataID as the root_ca length: 0x0000f003 (with a
+		// 0x00 in front of an actual 0x03f0 u64) reads back as ~66 MB,
+		// Ryujinx falls into a null-deref when the alloc / read fails.
+		// Buffer is correct; this comment is the receipts.
 		body.Buffer(courses.rootCA)  // root_ca_cert
 		body.U64(dataID)             // data_id
 		resp := frameStruct(s, 0, body.Bytes())
-		fmt.Printf("[SMM2 Storage] prepare_get(25) data_id=%d -> %s (%d bytes)\n", dataID, url, m.Size)
+		fmt.Printf("[SMM2 Storage] prepare_get(25) data_id=%d -> %s (%d bytes%s)\n",
+			dataID, url, m.Size,
+			func() string {
+				if diskSize == 0 {
+					return ", FILE MISSING"
+				}
+				return ""
+			}())
 		return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, resp)
 	}
 

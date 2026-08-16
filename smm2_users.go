@@ -1,4 +1,4 @@
-package main
+﻿package main
 
 // Persistent maker-profile registry.
 //
@@ -26,9 +26,82 @@ import (
 	nex "github.com/NextendoNetwork/nextendo-nex"
 )
 
-// registeredProfile is one PID's RegisterUser(47) payload, kept for future
-// GetUsers(48)/SyncUserProfile(49) answers.
+// --- User-facing stat sub-structs ---------------------------------------------
+//
+// These mirror the wire-format stat maps the SMM2 client reads from UserInfo and
+// CourseInfo. We track them as plain semantic fields in profiles.json / catalog
+// so a future review can wire them to the wire with a real Nintendo capture
+// (maker_stats' byte keys are NOT documented by Nintendo — neither
+// nintendoclients nor kinnay — and we discovered empirically that key 0 renders
+// as "likes received" in the SMM2 client, NOT "courses uploaded").
+//
+// Sub-structs are kept small and flat on purpose: they're the on-disk shape
+// the user (and `cat profiles.json | jq`) sees, and they round-trip through
+// encoding/json without surprises.
+
+// playStats is what the user has done PLAYING (mirrors CourseInfo.play_stats keys).
+// Per NintendoClients PlayStatsKeys: PLAYS=0, CLEARS=1, ATTEMPTS=2, DEATHS=3.
+//
+// Not directly fed by anything yet: SMM2's play events are reported by the client
+// via undocumented methods, and the Nintendo central service aggregates them. On
+// this private server we have no reporting path, so these stay at 0 unless a
+// future handler starts writing them. The fields are PRESENT so the wire encoder
+// can emit them as soon as data shows up.
+type playStats struct {
+	Plays    uint32 `json:"plays"`
+	Clears   uint32 `json:"clears"`
+	Attempts uint32 `json:"attempts"`
+	Deaths   uint32 `json:"deaths"`
+}
+
+// makerStats is what the user has done as a MAKER — derived from activity on
+// their uploaded courses. All fields are written by:
+//   - Maker.Uploaded          : reconcileFromCatalog (catalog ground truth)
+//   - Maker.{Plays,Clears,Attempts,Deaths}Received : event handlers, when wired
+//   - Maker.LikesReceived     : rate_object (15) handler — slot 0 = like
+//   - Maker.HeartsReceived    : rate_object (15) handler — slot 1 = heart (guess)
+//   - Maker.BoosReceived      : rate_object (15) handler — slot 2 = boo (guess)
+//   - Maker.MakerPoints       : derived (Nintendo ranking points; not yet)
+type makerStats struct {
+	Uploaded         uint32 `json:"uploaded"`
+	PlaysReceived    uint32 `json:"plays_received"`
+	ClearsReceived   uint32 `json:"clears_received"`
+	AttemptsReceived uint32 `json:"attempts_received"`
+	DeathsReceived   uint32 `json:"deaths_received"`
+	LikesReceived    uint32 `json:"likes_received"`
+	HeartsReceived   uint32 `json:"hearts_received"`
+	BoosReceived     uint32 `json:"boos_received"`
+	MakerPoints      uint32 `json:"maker_points"`
+}
+
+// multiplayerStats mirrors MultiplayerStatsKeys.
+// 0=MULTIPLAYER_SCORE, 2=VERSUS_PLAYS, 3=VERSUS_WINS, 10=COOP_PLAYS, 11=COOP_WINS.
+// Not fed by anything yet; placeholders so a future multiplayer handler can bump
+// them without a JSON-shape change.
+type multiplayerStats struct {
+	Score       uint32 `json:"score"`
+	VersusPlays uint32 `json:"versus_plays"`
+	VersusWins  uint32 `json:"versus_wins"`
+	CoopPlays   uint32 `json:"coop_plays"`
+	CoopWins    uint32 `json:"coop_wins"`
+}
+
+// badgeInfo mirrors BadgeInfo{u16 unk1, u8 unk2}. Exact field meanings are
+// undocumented; unk1 is likely a badge "type" (100-playmaker, 1000-first-clear,
+// etc) and unk2 a level within that type. Empty for now — no handler awards badges.
+type badgeInfo struct {
+	Unk1 uint16 `json:"unk1"`
+	Unk2 uint8  `json:"unk2"`
+}
+
+// registeredProfile is one PID's full profile: RegisterUser(47) payload + every
+// per-user stat the SMM2 UserInfo struct can carry (per nintendoclients
+// datastore_smm2 UserInfo). Kept in memory + a JSON file so it survives restarts.
+//
+// Anything that gets aggregated per-user is here, regardless of whether we have
+// a wire encoding for it yet. New stat sources only need to add a writer.
 type registeredProfile struct {
+	// --- Identity (from RegisterUser 47) ---
 	PID            uint64 `json:"pid"`
 	Username       string `json:"username"`
 	MiiDataHex     string `json:"mii_data_hex"` // qBuffer from RegisterUserParam, hex
@@ -37,6 +110,49 @@ type registeredProfile struct {
 	CountryCode    string `json:"country_code"`
 	PseudoDeviceID string `json:"pseudo_device_id"`
 	RegisteredAt   int64  `json:"registered_at"`
+
+	// --- Player activity (the user playing) ---
+	Play playStats `json:"play_stats"`
+
+	// --- Maker activity (received on their uploaded courses) ---
+	Maker makerStats `json:"maker_stats"`
+
+	// --- Multiplayer ---
+	Multiplayer multiplayerStats `json:"multiplayer_stats"`
+
+	// --- Endless challenge best score per difficulty.
+	// Key: 0=Easy, 1=Normal, 2=Expert, 3=Super Expert (per CourseDifficulty). Empty
+	// for now — no handler reads/reports endless-mode high scores yet.
+	EndlessHighScores map[uint8]uint32 `json:"endless_high_scores"`
+
+	// --- Badges (per-badge, see badgeInfo). Empty for now. ---
+	Badges []badgeInfo `json:"badges"`
+
+	// --- Three unknown stat maps (Map<u8, u32>) per nintendoclients UserInfo
+	// (unk7/unk8/unk9). No data today; present so a future handler has a place
+	// to write without re-shaping the JSON.
+	Unk7 map[uint8]uint32 `json:"unk7"`
+	Unk8 map[uint8]uint32 `json:"unk8"`
+	Unk9 map[uint8]uint32 `json:"unk9"`
+
+	// --- UserInfo revision>=1 extras (would need UserInfo struct version>=1) ---
+	Unk10 bool  `json:"unk10"`
+	Unk11 int64 `json:"unk11"`
+	Unk12 bool  `json:"unk12"`
+
+	// --- UserInfo revision>=3 extras (would need UserInfo struct version>=3) ---
+	Unk14 string           `json:"unk14"`
+	Unk15 map[uint8]uint32 `json:"unk15"`
+	Unk16 bool             `json:"unk16"`
+
+	// --- Per-profile upload list (denormalized for cheap reads in 74).
+	// UploadedCount is len(UploadedIDs); kept redundant for quick display without
+	// an extra len() and to make the value trivially greppable in profiles.json.
+	// Source of truth is the catalog (c.byID): on every server start we call
+	// reconcileFromCatalog so an out-of-band edit / older server / manual move
+	// doesn't drift the count. Also kept in sync with Maker.Uploaded.
+	UploadedCount int      `json:"uploaded_count"`
+	UploadedIDs   []uint64 `json:"uploaded_ids"`
 }
 
 type profileRegistry struct {
@@ -97,6 +213,230 @@ func (p *profileRegistry) get(pid uint64) *registeredProfile {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.byPID[pid]
+}
+
+// recordUpload adds dataID to pid's UploadedIDs (and bumps UploadedCount +
+// Maker.Uploaded) if pid is already registered AND dataID isn't already on the
+// list — idempotent, so a retry of the same upload (or the markReadyForPID sweep
+// that fires on every CompletePostObjectsCourse call) doesn't double-count.
+// Returns true if the list actually grew.
+//
+// Profiles that haven't been registered yet (no RegisterUser(47) received) are NOT
+// materialised by this call — we don't have a username/Mii for them, so creating an
+// entry here would just be a useless ghost profile. Their courses are still findable
+// via the catalog directly (SearchCoursesPostedBy(74), get_courses(70) filtered by PID).
+func (p *profileRegistry) recordUpload(pid uint64, dataID uint64) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	r := p.byPID[pid]
+	if r == nil {
+		return false
+	}
+	for _, id := range r.UploadedIDs {
+		if id == dataID {
+			return false
+		}
+	}
+	r.UploadedIDs = append(r.UploadedIDs, dataID)
+	r.UploadedCount = len(r.UploadedIDs)
+	r.Maker.Uploaded = uint32(len(r.UploadedIDs))
+	p.persistLocked()
+	return true
+}
+
+// recordRating applies a rate_object(15) event to pid's maker stats.
+//
+// slot mapping (SMM2's DataStoreRatingTarget.slot):
+//   0 = like  → Maker.LikesReceived++
+//   1 = heart → Maker.HeartsReceived++  (tentative; slot-to-type mapping isn't
+//   2 = boo   → Maker.BoosReceived++    documented anywhere we can verify)
+//
+// ratingValue of 0 typically means "cleared/reset a previous rating", so we DON'T
+// count those — the previous rating stays in the aggregate. Only strictly-positive
+// values bump the counter. No-op for unregistered PIDs (they have no maker profile
+// to credit; the rate still goes through to the per-course counter in
+// courses.recordRating, which is the source of truth for the course's own stats).
+func (p *profileRegistry) recordRating(pid uint64, slot uint8, ratingValue int64) {
+	if ratingValue <= 0 {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	r := p.byPID[pid]
+	if r == nil {
+		return
+	}
+	switch slot {
+	case 0:
+		r.Maker.LikesReceived++
+	case 1:
+		r.Maker.HeartsReceived++
+	case 2:
+		r.Maker.BoosReceived++
+	}
+	p.persistLocked()
+}
+
+// applyMakerReceived adds deltas to a profile's "received" stats. Called by
+// future play/clear/death event handlers. No-op for unregistered PIDs.
+func (p *profileRegistry) applyMakerReceived(pid uint64, plays, clears, attempts, deaths uint32) {
+	if plays == 0 && clears == 0 && attempts == 0 && deaths == 0 {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	r := p.byPID[pid]
+	if r == nil {
+		return
+	}
+	r.Maker.PlaysReceived += plays
+	r.Maker.ClearsReceived += clears
+	r.Maker.AttemptsReceived += attempts
+	r.Maker.DeathsReceived += deaths
+	p.persistLocked()
+}
+
+// applyPlayStats adds deltas to a profile's own play_stats (the user playing).
+// No-op for unregistered PIDs.
+func (p *profileRegistry) applyPlayStats(pid uint64, plays, clears, attempts, deaths uint32) {
+	if plays == 0 && clears == 0 && attempts == 0 && deaths == 0 {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	r := p.byPID[pid]
+	if r == nil {
+		return
+	}
+	r.Play.Plays += plays
+	r.Play.Clears += clears
+	r.Play.Attempts += attempts
+	r.Play.Deaths += deaths
+	p.persistLocked()
+}
+
+// applyMultiplayer adds deltas to a profile's multiplayer_stats. No-op for
+// unregistered PIDs.
+func (p *profileRegistry) applyMultiplayer(pid uint64, score, versusPlays, versusWins, coopPlays, coopWins uint32) {
+	if score == 0 && versusPlays == 0 && versusWins == 0 && coopPlays == 0 && coopWins == 0 {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	r := p.byPID[pid]
+	if r == nil {
+		return
+	}
+	r.Multiplayer.Score += score
+	r.Multiplayer.VersusPlays += versusPlays
+	r.Multiplayer.VersusWins += versusWins
+	r.Multiplayer.CoopPlays += coopPlays
+	r.Multiplayer.CoopWins += coopWins
+	p.persistLocked()
+}
+
+// setEndlessHighScore records a new best for a difficulty. Only writes if `score`
+// exceeds the previous value (it's a HIGH score, not a counter). Pass difficulty
+// per CourseDifficulty: 0=Easy, 1=Normal, 2=Expert, 3=Super Expert.
+//
+// No-op for unregistered PIDs. Allocates the map on first use.
+func (p *profileRegistry) setEndlessHighScore(pid uint64, difficulty uint8, score uint32) {
+	if score == 0 {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	r := p.byPID[pid]
+	if r == nil {
+		return
+	}
+	if r.EndlessHighScores == nil {
+		r.EndlessHighScores = map[uint8]uint32{}
+	}
+	if cur, ok := r.EndlessHighScores[difficulty]; !ok || score > cur {
+		r.EndlessHighScores[difficulty] = score
+		p.persistLocked()
+	}
+}
+
+// addBadge appends a badge. No dedup: SMM2 might legitimately award the same
+// type+level multiple times for repeat achievements. No-op for unregistered PIDs.
+func (p *profileRegistry) addBadge(pid uint64, unk1 uint16, unk2 uint8) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	r := p.byPID[pid]
+	if r == nil {
+		return
+	}
+	r.Badges = append(r.Badges, badgeInfo{Unk1: unk1, Unk2: unk2})
+	p.persistLocked()
+}
+
+// reconcileFromCatalog rebuilds every profile's UploadedIDs / UploadedCount from the
+// catalog ground truth (map of dataID -> ownerPID). Called once at server start, AFTER
+// the catalog has loaded. Also seeds an entry for any PID that owns courses but never
+// called RegisterUser(47) — without this, a PID that uploaded before registering would
+// not show up in profiles.json at all, even though the courses themselves are
+// persistent. The seed entry has empty Username/Mii so it doesn't pretend to be a
+// real registered profile; SearchCoursesPostedBy(74) still works for it.
+func (p *profileRegistry) reconcileFromCatalog(catalog map[uint64]*courseMeta) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	changed := false
+	// 1) Rebuild per-profile lists from the catalog.
+	byPID := map[uint64][]uint64{}
+	for id, m := range catalog {
+		byPID[m.OwnerPID] = append(byPID[m.OwnerPID], id)
+	}
+	for pid, ids := range byPID {
+		r := p.byPID[pid]
+		if r == nil {
+			// Seed a profile for an owner we know from the catalog but who never registered.
+			r = &registeredProfile{PID: pid, UploadedCount: 0}
+			p.byPID[pid] = r
+			changed = true
+		}
+		// Cheap equality check before overwriting — avoids re-marshalling profiles.json
+		// on every restart just because the order changed.
+		same := len(r.UploadedIDs) == len(ids)
+		if same {
+			// Sort both for unordered compare.
+			a := append([]uint64(nil), r.UploadedIDs...)
+			b := append([]uint64(nil), ids...)
+			sortUint64(a)
+			sortUint64(b)
+			for i := range a {
+				if a[i] != b[i] {
+					same = false
+					break
+				}
+			}
+		}
+		if !same {
+			r.UploadedIDs = append([]uint64(nil), ids...)
+			r.UploadedCount = len(r.UploadedIDs)
+			r.Maker.Uploaded = uint32(len(r.UploadedIDs))
+			changed = true
+		} else if r.Maker.Uploaded != uint32(len(r.UploadedIDs)) {
+			// Counters drifted (e.g. an older profiles.json from before the
+			// Maker.Uploaded field existed). Re-sync without touching the list.
+			r.Maker.Uploaded = uint32(len(r.UploadedIDs))
+			changed = true
+		}
+	}
+	if changed {
+		p.persistLocked()
+	}
+}
+
+// sortUint64 is a tiny insertion sort used by reconcileFromCatalog. Avoids pulling in
+// the "sort" stdlib package for one helper.
+func sortUint64(a []uint64) {
+	for i := 1; i < len(a); i++ {
+		for j := i; j > 0 && a[j-1] > a[j]; j-- {
+			a[j-1], a[j] = a[j], a[j-1]
+		}
+	}
 }
 
 func (r *registeredProfile) miiBytes() []byte {
@@ -202,14 +542,72 @@ func writeU8U32Map(out *nex.StreamOut, m map[uint8]uint32) {
 	}
 }
 
+// buildPlayStatsMap converts a playStats sub-struct into a wire Map<u8, u32>
+// using the documented PlayStatsKeys: PLAYS=0, CLEARS=1, ATTEMPTS=2, DEATHS=3.
+// Returns nil if every value is zero so the wire encoder writes a length-0 map
+// (clients that read it see "no data" instead of "all zeros").
+func buildPlayStatsMap(p playStats) map[uint8]uint32 {
+	if p.Plays == 0 && p.Clears == 0 && p.Attempts == 0 && p.Deaths == 0 {
+		return nil
+	}
+	m := map[uint8]uint32{0: p.Plays, 1: p.Clears, 2: p.Attempts, 3: p.Deaths}
+	return m
+}
+
+// buildMultiplayerStatsMap converts a multiplayerStats into a wire Map<u8, u32>
+// using the documented MultiplayerStatsKeys:
+// 0=MULTIPLAYER_SCORE, 2=VERSUS_PLAYS, 3=VERSUS_WINS, 10=COOP_PLAYS, 11=COOP_WINS.
+// Returns nil if every value is zero.
+func buildMultiplayerStatsMap(m multiplayerStats) map[uint8]uint32 {
+	if m.Score == 0 && m.VersusPlays == 0 && m.VersusWins == 0 && m.CoopPlays == 0 && m.CoopWins == 0 {
+		return nil
+	}
+	out := map[uint8]uint32{
+		0:  m.Score,
+		2:  m.VersusPlays,
+		3:  m.VersusWins,
+		10: m.CoopPlays,
+		11: m.CoopWins,
+	}
+	return out
+}
+
+// buildMakerStatsMap converts a makerStats into a wire Map<u8, u32>.
+//
+// WARNING: maker_stats' byte-key mapping is NOT documented by Nintendo (neither
+// nintendoclients nor kinnay). Empirically, key 0 renders as "likes received" in
+// the SMM2 client — an earlier "fix" that put UploadedCount in key 0 instead
+// showed it as a likes count, confirming the slot. The byte keys for "courses
+// uploaded" and the other maker fields are still unknown. Until a real Nintendo
+// capture tells us the mapping, we emit ONLY what we've verified by experiment:
+// key 0 = likes received. Clients that don't have a known key ignore the entry,
+// and 74 (search_courses_posted_by) still serves the actual list of uploads.
+//
+// Other maker_stats fields (Uploaded, PlaysReceived, ClearsReceived, ...) are
+// tracked in profiles.json and ready to be wired to the correct keys as soon as
+// the mapping is known.
+func buildMakerStatsMap(m makerStats) map[uint8]uint32 {
+	if m.LikesReceived == 0 {
+		return nil
+	}
+	return map[uint8]uint32{0: m.LikesReceived}
+}
+
 // syntheticUserInfoFromProfile builds a COMPLETE version-0 UserInfo for get_users(48)
-// from a stored registration — every documented field present, not just the
-// pid/code/name/Mii prefix we had before.
+// from a stored registration — every documented field present, populated from the
+// profile's tracked stats where we know the wire encoding, and explicitly empty
+// (not MISSING) where we don't.
 func syntheticUserInfoFromProfile(s *nex.Settings, pid uint64, r *registeredProfile) []byte {
 	name := pseudoOr(pid)
 	var unk1, mii []byte
 	var country string
 	var region uint8
+	var play playStats
+	var maker makerStats
+	var multi multiplayerStats
+	var endless map[uint8]uint32
+	var badges []badgeInfo
+	var unk7, unk8, unk9 map[uint8]uint32
 	if r != nil {
 		if r.Username != "" {
 			name = r.Username
@@ -218,6 +616,14 @@ func syntheticUserInfoFromProfile(s *nex.Settings, pid uint64, r *registeredProf
 		mii = r.miiBytes()
 		country = r.CountryCode
 		region = r.RegionID
+		play = r.Play
+		maker = r.Maker
+		multi = r.Multiplayer
+		endless = r.EndlessHighScores
+		badges = r.Badges
+		unk7 = r.Unk7
+		unk8 = r.Unk8
+		unk9 = r.Unk9
 	}
 
 	out := nex.NewStreamOut(s)
@@ -232,15 +638,29 @@ func syntheticUserInfoFromProfile(s *nex.Settings, pid uint64, r *registeredProf
 	out.Bool(false)                         // unk3
 	out.Bool(false)                         // unk4
 	out.Bool(false)                         // unk5
-	writeU8U32Map(out, nil)                 // play_stats
-	writeU8U32Map(out, nil)                 // maker_stats
-	writeU8U32Map(out, nil)                 // endless_challenge_high_scores
-	writeU8U32Map(out, nil)                 // multiplayer_stats
-	writeU8U32Map(out, nil)                 // unk7
-	out.U32(0)                              // badges: List<BadgeInfo> count = 0
-	writeU8U32Map(out, nil)                 // unk8
-	writeU8U32Map(out, nil)                 // unk9
+	writeU8U32Map(out, buildPlayStatsMap(play))                  // play_stats (PlayStatsKeys)
+	writeU8U32Map(out, buildMakerStatsMap(maker))                // maker_stats (only verified keys; see comment)
+	writeU8U32Map(out, endless)                                  // endless_challenge_high_scores
+	writeU8U32Map(out, buildMultiplayerStatsMap(multi))          // multiplayer_stats (MultiplayerStatsKeys)
+	writeU8U32Map(out, unk7)                                     // unk7
+	writeBadgeInfoList(out, badges)                              // badges: List<BadgeInfo>
+	writeU8U32Map(out, unk8)                                     // unk8
+	writeU8U32Map(out, unk9)                                     // unk9
 	return frameStruct(s, 0, out.Bytes())
+}
+
+// writeBadgeInfoList serialises a List<BadgeInfo> per the documented kinnay/
+// nintendoclients BadgeInfo shape (u16 unk1, u8 unk2). Pass nil for an empty list.
+func writeBadgeInfoList(out *nex.StreamOut, list []badgeInfo) {
+	if len(list) == 0 {
+		out.U32(0)
+		return
+	}
+	out.U32(uint32(len(list)))
+	for _, b := range list {
+		out.U16(b.Unk1)
+		out.U8(b.Unk2)
+	}
 }
 
 // syntheticSyncProfileResult builds a minimal SyncUserProfileResult for

@@ -38,7 +38,10 @@ var smm2EmptyBuilders = map[uint32]func(*nex.StreamOut){
 	71: func(o *nex.StreamOut) { o.U32(0); o.U32(0); o.Bool(true) }, // point_ranking: courses[], ranks[], result
 	// 73 (search_courses_latest / "New Courses"): wired to smm2SearchCoursesLatest
 	// in the switch below, now that CourseInfo is confirmed working.
-	74: func(o *nex.StreamOut) { o.U32(0); o.Bool(true) },        // search_courses_posted_by
+	// 74 (search_courses_posted_by): wired to smm2SearchCoursesPostedBy in the
+	// switch below. The empty-list response was lying — even a player with uploads
+	// got an empty "courses posted by" page, both in their own maker profile and on
+	// other players' profile pages.
 	75: func(o *nex.StreamOut) { o.U32(0) },                      // search_courses_positive_rated_by
 	76: func(o *nex.StreamOut) { o.U32(0) },                      // search_courses_played_by
 	79: func(o *nex.StreamOut) { o.U32(0) },                      // search_courses_endless_mode
@@ -187,6 +190,20 @@ func smm2DataStoreHandler() nex.RMCHandler {
 		case 73:
 			// search_courses_latest: "New Courses" tab, global across all uploaders.
 			return smm2SearchCoursesLatest(conn, req)
+		case 15:
+			// rate_object: like/heart/boo on a course. Was previously falling through
+			// to NotFound, so any attempt to rate a course failed silently and the
+			// per-course LikeCount + the owner's MakerStats.LikesReceived never
+			// moved. Now wired: bumps courses.recordRating + profiles.recordRating
+			// and returns the updated aggregate.
+			return smm2RateObject(conn, req)
+		case 74:
+			// search_courses_posted_by: "courses by player X" — backs the maker
+			// profile's "My courses" tab AND other players' profile pages. Per
+			// SearchCoursesPostedByParam (NintendoClients:1607), takes a pid list
+			// and a ResultRange pagination window; we treat the first pid as the
+			// owner (SMM2 sends one at a time in practice).
+			return smm2SearchCoursesPostedBy(conn, req)
 		case 134:
 			// get_req_get_info_headers_info: the client calls this before actually
 			// fetching a relation object (thumbnail) over HTTP — confirmed via a real

@@ -17,8 +17,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -145,27 +143,18 @@ func writeRelationObjectReqGetInfo(out *nex.StreamOut, url string, size uint32) 
 
 // relationSizeOnDisk returns the on-disk byte size of the relation blob for a given
 // (dataID, relType) — used to populate RelationObjectReqGetInfo.size with the real
-// upload size, not a hardcoded guess. Returns 0 if the file is missing.
+// upload size, not a hardcoded guess. Returns 0 if the file is missing OR if relType
+// is not one we store (relationPath returns "" for those — e.g. relType 4).
 func relationSizeOnDisk(dataID uint64, relType uint32) uint32 {
-	st, err := os.Stat(filepath.Join(storageDir, relationFileName(dataID, relType)))
+	p := relationPath(dataID, relType)
+	if p == "" {
+		return 0
+	}
+	st, err := os.Stat(p)
 	if err != nil {
 		return 0
 	}
 	return uint32(st.Size())
-}
-
-// relationFileName returns the on-disk filename for a relation blob, matching
-// smm2_objects.go's PrepareRelationUpload key scheme ("thumb1_<id>" etc, sanitized
-// with an "obj_" prefix by sanitizeKey in smm2_storage.go).
-func relationFileName(dataID uint64, relType uint32) string {
-	switch relType {
-	case 1:
-		return "obj_thumb1_" + strconv.FormatUint(dataID, 10)
-	case 2:
-		return "obj_thumb2_" + strconv.FormatUint(dataID, 10)
-	default:
-		return ""
-	}
 }
 
 // relationBytesOnDisk reads a relation blob's content from disk, or nil if missing
@@ -178,11 +167,11 @@ func relationFileName(dataID uint64, relType uint32) string {
 // method 134 answered successfully). A max size guards against embedding something
 // absurdly large into a QBuffer (u16 length prefix, 65535-byte ceiling).
 func relationBytesOnDisk(dataID uint64, relType uint32, maxSize int) []byte {
-	name := relationFileName(dataID, relType)
-	if name == "" {
+	p := relationPath(dataID, relType)
+	if p == "" {
 		return nil
 	}
-	b, err := os.ReadFile(filepath.Join(storageDir, name))
+	b, err := os.ReadFile(p)
 	if err != nil || len(b) > maxSize {
 		return nil
 	}
@@ -207,14 +196,19 @@ func buildCourseInfo(s *nex.Settings, m *courseMeta) []byte {
 	}
 
 	// Thumbnail URLs (empty if the file isn't on disk — SMM2 treats that as
-	// "no thumbnail" rather than failing the whole CourseInfo).
+	// "no thumbnail" rather than failing the whole CourseInfo). URL shape must match the
+	// key produced by smm2PrepareRelationUpload (now "<dataID>/<relType>") so the GET
+	// path's parseRelationKey recognises it and lands on the same relationPath() that
+	// wrote it. An earlier version returned "/relation/thumb1_<id>" — which matched the
+	// upload's old key but, because the upload has since been moved to <id>/<relType>,
+	// would have hit a 404 + octet-stream even after a successful upload.
 	thumb1URL := ""
 	thumb2URL := ""
 	if sz := relationSizeOnDisk(m.DataID, 1); sz > 0 {
-		thumb1URL = fmt.Sprintf("%s/relation/thumb1_%d", storageURL, m.DataID)
+		thumb1URL = fmt.Sprintf("%s/relation/%d/%d", storageURL, m.DataID, uint32(1))
 	}
 	if sz := relationSizeOnDisk(m.DataID, 2); sz > 0 {
-		thumb2URL = fmt.Sprintf("%s/relation/thumb2_%d", storageURL, m.DataID)
+		thumb2URL = fmt.Sprintf("%s/relation/%d/%d", storageURL, m.DataID, uint32(2))
 	}
 
 	out := nex.NewStreamOut(s)
@@ -241,11 +235,11 @@ func buildCourseInfo(s *nex.Settings, m *courseMeta) []byte {
 	// was pure overhead (up to ~40KB per course) otherwise. This is now a known
 	// limitation with no further untested, well-reasoned hypothesis — see memory notes.
 	out.QBuffer(nil)
-	writeU8U32Map(out, nil)            // play_stats
-	writeU8U32Map(out, nil)            // ratings
+	writeU8U32Map(out, buildCoursePlayStatsMap(m))  // play_stats (PlayStatsKeys)
+	writeU8U32Map(out, buildCourseRatingsMap(m))     // ratings (slot 0=like,1=heart,2=boo)
 	writeU8U32Map(out, nil)            // unk4
 	writeCourseTimeStats(out)          // time_stats (substruct)
-	writeU8U32Map(out, nil)            // comment_stats
+	writeU8U32Map(out, m.CommentCounts) // comment_stats (per slot; empty if no comments)
 	out.U8(0)                          // unk9
 	out.U8(0)                          // unk10
 	out.U8(0)                          // unk11
@@ -254,6 +248,36 @@ func buildCourseInfo(s *nex.Settings, m *courseMeta) []byte {
 	writeRelationObjectReqGetInfo(out, thumb2URL, relationSizeOnDisk(m.DataID, 2)) // entire_thumbnail
 
 	return frameStruct(s, 0, out.Bytes())
+}
+
+// buildCoursePlayStatsMap converts a courseMeta's play/clear/attempt/death
+// counters into a wire Map<u8, u32> using the documented PlayStatsKeys
+// (PLAYS=0, CLEARS=1, ATTEMPTS=2, DEATHS=3). Returns nil when all four are 0
+// so the wire encoder writes a length-0 map.
+func buildCoursePlayStatsMap(m *courseMeta) map[uint8]uint32 {
+	if m.PlayCount == 0 && m.ClearCount == 0 && m.AttemptCount == 0 && m.DeathCount == 0 {
+		return nil
+	}
+	return map[uint8]uint32{
+		0: m.PlayCount,
+		1: m.ClearCount,
+		2: m.AttemptCount,
+		3: m.DeathCount,
+	}
+}
+
+// buildCourseRatingsMap converts a courseMeta's like/heart/boos counters into a
+// wire Map<u8, u32> indexed by slot (0=like, 1=heart, 2=boo — same slot values
+// the rate_object(15) handler writes to). Returns nil when all three are 0.
+func buildCourseRatingsMap(m *courseMeta) map[uint8]uint32 {
+	if m.LikeCount == 0 && m.HeartCount == 0 && m.BoosCount == 0 {
+		return nil
+	}
+	return map[uint8]uint32{
+		0: m.LikeCount,
+		1: m.HeartCount,
+		2: m.BoosCount,
+	}
 }
 
 // smm2GetCourses handles get_courses(70). Response: list<CourseInfo> + list<result>.
@@ -350,4 +374,200 @@ func smm2GetReqGetInfoHeadersInfo(conn *nex.Connection, req *nex.RMCMessage) *ne
 
 	fmt.Printf("[SMM2 Courses] get_req_get_info_headers_info(134) pid=%d type=%d -> empty headers, no expiration\n", conn.PID, reqType)
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
+}
+
+// smm2SearchCoursesPostedBy handles search_courses_posted_by(74) — the "courses
+// posted by player X" browse path that backs the maker profile's "My courses" tab
+// AND another player's profile page (when you tap their Mii, SMM2 calls 74 with that
+// PID in the request, not conn.PID).
+//
+// Request shape (NintendoClients:1607 SearchCoursesPostedByParam):
+//
+//	option u32       // filter flags (per the wiki, undocumented in detail)
+//	range  ResultRange  // {offset u32, size u32} pagination window
+//	pids   list<u64>  // one or more owners to query
+//
+// Response: list<CourseInfo> + bool result. We treat the first pid as the canonical
+// owner (SMM2 sends one at a time in practice) and apply the offset/size window
+// against the owner's Ready list, newest first.
+//
+// Was a stub in smm2EmptyBuilders returning an empty list — meaning the "courses
+// posted by" call the client made when viewing a profile page was answered with 0
+// courses even when that player had uploaded. Now wired.
+func smm2SearchCoursesPostedBy(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
+	s := conn.Settings
+	ownerPID, offset, size := parseSearchCoursesPostedByParam(s, req.Body)
+	// If the request didn't name a pid (shouldn't happen — it's required per spec),
+	// fall back to the connected player. Mirrors the get_users(48) "fallback to
+	// conn.PID when the client asked for itself with a different number" trick.
+	if ownerPID == 0 {
+		ownerPID = conn.PID
+	}
+
+	list := courses.listByOwnerReady(ownerPID)
+	// Apply pagination window.
+	if offset > uint32(len(list)) {
+		offset = uint32(len(list))
+	}
+	end := offset
+	if size > 0 {
+		end = offset + size
+	}
+	if end > uint32(len(list)) {
+		end = uint32(len(list))
+	}
+	page := list[offset:end]
+
+	out := nex.NewStreamOut(s)
+	out.U32(uint32(len(page)))
+	for _, m := range page {
+		out.Write(buildCourseInfo(s, m))
+	}
+	out.Bool(true)
+
+	fmt.Printf("[SMM2 Courses] search_courses_posted_by(74) pid=%d owner=%d offset=%d size=%d -> %d/%d course(s)\n",
+		conn.PID, ownerPID, offset, size, len(page), len(list))
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
+}
+
+// parseSearchCoursesPostedByParam decodes the SearchCoursesPostedByParam body.
+// Returns (ownerPID, offset, size). ownerPID is the FIRST pid in the request list
+// (a 0-length list yields 0; the caller can then fall back to conn.PID).
+//
+// Per NintendoClients/datastore_smm2.py:1619:
+//
+//	stream.u32(option)
+//	stream.extract(ResultRange)  // u32 offset, u32 size
+//	stream.list(stream.u64)      // pids
+func parseSearchCoursesPostedByParam(s *nex.Settings, body []byte) (ownerPID uint64, offset, size uint32) {
+	defer func() { recover() }()
+	in := nex.NewStreamIn(body, s)
+	_ = in.U8() // SearchCoursesPostedByParam struct version
+	sub := in.Substream()
+	_ = sub.U32() // option (ignored: we don't filter on it)
+	offset = sub.U32()
+	size = sub.U32()
+	n := sub.U32()
+	if n > 0 {
+		ownerPID = sub.U64()
+		// Drain the rest of the list even though we only act on the first pid; the
+		// spec allows multiple pids in one request and a future feature may want them.
+		for i := uint32(1); i < n; i++ {
+			_ = sub.U64()
+		}
+	}
+	return
+}
+
+// smm2RateObject handles rate_object(15) — the like/heart/boo path. Per
+// NintendoClients/datastore_smm2.py:
+//
+//	rate_object(target: DataStoreRatingTarget, param: DataStoreRateObjectParam,
+//	            fetch_ratings: bool) -> DataStoreRatingInfo
+//
+// Where:
+//   target = { data_id: u64, slot: u8 }  // slot 0=like, 1=heart, 2=boo
+//   param  = { rating_value: s32, access_password: u32 }
+//   return = { total_value: s64, count: u32, initial_value: s64 }
+//
+// The total_value is a sum of all rating_value's ever assigned to this slot,
+// count is the number of raters, and initial_value is the seed (commonly 0 or
+// the first rating). We maintain per-course counters and a per-slot
+// initial_value on first-seen; the aggregate returned to the client is
+// (count * 1, count) — i.e. one vote per rater, since the SMM2 wire format
+// doesn't differentiate multiple votes by the same pid here (that lives in
+// get_rating_with_log / DataStoreRatingLog, unimplemented).
+//
+// Side effects:
+//   - courses.recordRating: bumps LikeCount/HeartCount/BoosCount + records
+//     first-seen rating as the slot's initial_value.
+//   - profiles.recordRating: bumps the owner's MakerStats.{Likes,Hearts,Boos}Received
+//     counter (the per-user aggregate that goes into UserInfo.maker_stats on
+//     the wire).
+//
+// The body uses the same [u8 version][substream] framing the rest of this
+// server uses for RMC params.
+func smm2RateObject(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
+	s := conn.Settings
+	dataID, slot, ratingValue, ok := parseRateObjectParam(s, req.Body)
+	if !ok {
+		fmt.Printf("[SMM2 Courses] rate_object(15) pid=%d -> param parse failed (%dB)\n", conn.PID, len(req.Body))
+		return nex.NewRMCError(s, 0x73, req.CallID, 0x80690004) // DataStore::NotFound
+	}
+
+	// Apply to the course. recordRating returns the owner's PID so we can
+	// credit the per-profile aggregate in the same call.
+	ownerPID := courses.recordRating(dataID, slot, int64(ratingValue))
+	// Mirror on the owner (if registered). Unregistered owners just see the
+	// course's own LikeCount — their profile isn't materialised just to hold
+	// a like, that would create ghost entries.
+	profiles.recordRating(ownerPID, slot, int64(ratingValue))
+
+	// Aggregate we return to the client. The kinnay doc says
+	// (total_value, count, initial_value) — we approximate total_value as
+	// the current count (each rater contributes +1 to the aggregate) and
+	// count as the count of votes seen. initial_value is whatever we first
+	// stored for the slot, or 0 if the rate was 0 (which we ignored above).
+	m := courses.get(dataID)
+	count := uint32(0)
+	if m != nil {
+		switch slot {
+		case 0:
+			count = m.LikeCount
+		case 1:
+			count = m.HeartCount
+		case 2:
+			count = m.BoosCount
+		}
+	}
+	initial := int64(0)
+	if m != nil && m.RatingInitial != nil {
+		if v, has := m.RatingInitial[slot]; has {
+			initial = v
+		}
+	}
+
+	out := nex.NewStreamOut(s)
+	out.S64(int64(count)) // total_value: sum approximation
+	out.U32(count)        // count: # of raters (one per call here)
+	out.S64(initial)      // initial_value: first-seen rating for this slot
+	resp := frameStruct(s, 0, out.Bytes())
+
+	fmt.Printf("[SMM2 Courses] rate_object(15) pid=%d data_id=%d slot=%d value=%d -> count=%d initial=%d (owner=%d)\n",
+		conn.PID, dataID, slot, ratingValue, count, initial, ownerPID)
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, resp)
+}
+
+// parseRateObjectParam decodes the rate_object(15) request body per
+// NintendoClients/datastore_smm2.py:
+//
+//	stream.u8()           # RateObjectParam struct version
+//	substream: {
+//	  stream.u64()        # target.data_id
+//	  stream.u8()         # target.slot
+//	  stream.s32()        # param.rating_value
+//	  stream.u32()        # param.access_password (ignored — we don't lock courses)
+//	}
+//	stream.bool()         # fetch_ratings (out-of-substream; ignored — we always return
+//	                      # the single-slot aggregate, full-rating fetch is a separate
+//	                      # method, get_rating(16))
+//
+// The substream is part of the param struct; fetch_ratings is a sibling arg,
+// matching how every other documented DataStoreClientSMM2 method on the wiki
+// receives its extra bools.
+func parseRateObjectParam(s *nex.Settings, body []byte) (dataID uint64, slot uint8, ratingValue int32, ok bool) {
+	defer func() {
+		if recover() != nil {
+			ok = false
+		}
+	}()
+	in := nex.NewStreamIn(body, s)
+	_ = in.U8() // RateObjectParam struct version
+	sub := in.Substream()
+	dataID = sub.U64()
+	slot = sub.U8()
+	ratingValue = sub.S32()
+	_ = sub.U32() // access_password (ignored)
+	ok = true
+	return
 }

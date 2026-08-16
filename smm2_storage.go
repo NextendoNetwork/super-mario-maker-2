@@ -65,6 +65,32 @@ type courseMeta struct {
 	Ready       bool     `json:"ready"` // set by complete_post_object
 	Code        string   `json:"code"`  // SMM2 Course ID, e.g. "ABCD-1234-EFGH-5678"
 	CreatedAt   int64    `json:"created_at"`
+
+	// --- Per-course stats (the activity this course has received from players).
+	//
+	// PlayStats:  per CourseInfo.play_stats / PlayStatsKeys
+	//             (PLAYS=0, CLEARS=1, ATTEMPTS=2, DEATHS=3). All four bumped by
+	//             future play/clear/death event handlers (none wired today —
+	//             SMM2 doesn't expose a documented "I played this course" call
+	//             that we can hook).
+	//
+	// Ratings:    per CourseInfo.ratings — Map<u8, u32> indexed by slot.
+	//             Slot 0 = like, 1 = heart, 2 = boo. The rating_value 0 means
+	//             "clear previous rating" (no bump); > 0 bumps. Set by
+	//             rate_object(15).
+	//
+	// CommentStats: per CourseInfo.comment_stats — Map<u8, u32> by slot.
+	//              Slot-to-meaning undocumented. No event handler bumps these
+	//              yet (no comment-post handler is implemented).
+	PlayCount     uint32            `json:"play_count"`
+	ClearCount    uint32            `json:"clear_count"`
+	AttemptCount  uint32            `json:"attempt_count"`
+	DeathCount    uint32            `json:"death_count"`
+	LikeCount     uint32            `json:"like_count"`
+	HeartCount    uint32            `json:"heart_count"`
+	BoosCount     uint32            `json:"boos_count"`
+	RatingInitial map[uint8]int64   `json:"rating_initial"` // initial_value per slot, set on first rate
+	CommentCounts map[uint8]uint32  `json:"comment_counts"` // comment_stats per slot
 }
 
 type courseStore struct {
@@ -203,6 +229,28 @@ func (c *courseStore) listAllReady(limit int) []*courseMeta {
 	return ready
 }
 
+// listByOwnerReady returns every Ready course owned by ownerPID, sorted newest
+// first. Used by SearchCoursesPostedBy(74) — "courses posted by player X", which is
+// what the maker profile's "My courses" tab (or another player's profile page)
+// calls. Pagination is the caller's responsibility (listByOwnerReadyPaginated below
+// if a bounded scan is needed; today 74 just does the whole slice).
+func (c *courseStore) listByOwnerReady(ownerPID uint64) []*courseMeta {
+	c.mu.Lock()
+	ready := make([]*courseMeta, 0, len(c.byID))
+	for _, m := range c.byID {
+		if m.Ready && m.OwnerPID == ownerPID {
+			ready = append(ready, m)
+		}
+	}
+	c.mu.Unlock()
+	for i := 1; i < len(ready); i++ {
+		for j := i; j > 0 && ready[j-1].CreatedAt < ready[j].CreatedAt; j-- {
+			ready[j-1], ready[j] = ready[j], ready[j-1]
+		}
+	}
+	return ready
+}
+
 // setCode assigns the shareable Course ID string ("XXXX-XXXX-XXXX-XXXX") that
 // SMM2 displays post-upload. Called from CompletePostObjectsCourse(68) once the
 // upload is confirmed; persisted so the code survives server restarts.
@@ -224,6 +272,11 @@ func (c *courseStore) setCode(dataID uint64, code string) {
 // to mark it Ready before the client's get_courses(70) call asks for the catalog.
 // All courses for this PID are flipped, not just the newest, so a stale entry from
 // a previous failed upload also gets cleaned up.
+//
+// Also mirrors the upload into the per-profile registry (profiles.recordUpload) so
+// UserInfo.maker_stats and SearchCoursesPostedBy(74) see fresh counts without a restart.
+// recordUpload is idempotent (returns false on duplicates), so re-firing this method
+// across retries doesn't double-count.
 func (c *courseStore) markReadyForPID(ownerPID uint64) []*courseMeta {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -237,6 +290,10 @@ func (c *courseStore) markReadyForPID(ownerPID uint64) []*courseMeta {
 	if len(updated) > 0 {
 		c.persistLocked()
 	}
+	// Note: profiles.recordUpload is called from the caller (smm2CompletePostObjectsCourse
+	// in smm2_objects.go) after we return, so the registry update is in one place with
+	// the rest of the post-upload logging. Keeping it out of this method avoids a
+	// mu-on-mu deadlock if a future change reorders calls between the two registries.
 	return updated
 }
 
@@ -268,6 +325,66 @@ func (c *courseStore) setSize(dataID uint64, size uint32) {
 		m.Size = size
 		c.persistLocked()
 	}
+}
+
+// recordRating applies a rate_object(15) event to a course. Bumps the per-slot
+// counter and records the first-seen rating value as the slot's initial_value
+// (kinnay's DataStoreRatingInfo.initial_value, the seed for future sum/count
+// aggregates). ratingValue of 0 means "clear previous rating" — no counter bump.
+//
+// Slot mapping (SMM2's DataStoreRatingTarget.slot):
+//   0 = like  → LikeCount++
+//   1 = heart → HeartCount++
+//   2 = boo   → BoosCount++
+//
+// Returns the Owner's PID (so the caller can also credit the per-profile
+// MakerStats counters in profiles.recordRating), or 0 if the course is unknown.
+func (c *courseStore) recordRating(dataID uint64, slot uint8, ratingValue int64) uint64 {
+	if ratingValue <= 0 {
+		return 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	m := c.byID[dataID]
+	if m == nil {
+		return 0
+	}
+	switch slot {
+	case 0:
+		m.LikeCount++
+	case 1:
+		m.HeartCount++
+	case 2:
+		m.BoosCount++
+	}
+	if m.RatingInitial == nil {
+		m.RatingInitial = map[uint8]int64{}
+	}
+	if _, ok := m.RatingInitial[slot]; !ok {
+		m.RatingInitial[slot] = ratingValue
+	}
+	c.persistLocked()
+	return m.OwnerPID
+}
+
+// applyPlayed adds play/clear/attempt/death deltas to a course. Called by
+// future play-event handlers. Unknown dataIDs are silently ignored (the
+// course may have been deleted between event emission and handling).
+func (c *courseStore) applyPlayed(dataID uint64, plays, clears, attempts, deaths uint32) {
+	if plays == 0 && clears == 0 && attempts == 0 && deaths == 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	m := c.byID[dataID]
+	if m == nil {
+		return
+	}
+	m.PlayCount += plays
+	m.ClearCount += clears
+	m.AttemptCount += attempts
+	m.DeathCount += deaths
+	c.persistLocked()
 }
 
 func blobPath(dataID uint64) string { return filepath.Join(courseDir(dataID), "level.bin") }
@@ -390,6 +507,12 @@ func (c *courseStore) migrateFlatLayout() {
 	if moved > 0 {
 		fmt.Printf("[SMM2 Storage] migration: %d fichier(s) déplacé(s) vers courses/<id>/\n", moved)
 	}
+	// After the catalog is loaded AND files are in their new layout, ask the profile
+	// registry to rebuild its UploadedCount/UploadedIDs from the catalog ground truth.
+	// Catches three classes of drift: a PID uploaded before calling RegisterUser(47),
+	// a profile.json that pre-dated the per-course-dir refactor, and a profile that
+	// went out of sync after a manual edit / older server / rolled-back commit.
+	profiles.reconcileFromCatalog(c.byID)
 }
 
 func fileExists(path string) bool {
@@ -416,14 +539,17 @@ func startStorageServer() {
 		mux.ServeHTTP(w, r)
 	})
 	srv := &http.Server{Addr: fmt.Sprintf(":%d", storagePort), Handler: logged}
-	// (Previously disabled keep-alives here to test a theory about the relation-object
-	// uploads never reaching the server — that turned out NOT to be the actual fix
-	// (removing the "form" field's "key" entry was), and disabling keep-alives forces a
-	// full TLS handshake per request instead of reusing one connection across the level
-	// blob + 4 relation uploads. If the client has a fixed wall-clock timeout for the
-	// whole upload+completion handshake — consistent with the fixed ~8x retry-then-fail
-	// pattern we keep seeing regardless of response CONTENT — that extra per-request TLS
-	// cost could be exactly what's tipping it over. Re-enabling (the default) to test.
+	// Keep-alive off: the SMM2 client (Ryujinx capture) opens a connection, does
+	// the TLS handshake, fires the GET, receives the blob — then appears to hang
+	// waiting for the connection to close. With Go's default keep-alive, the
+	// server holds the socket open for the next request; the SMM2 client doesn't
+	// issue another one and never unblocks. Closing after every response matches
+	// what the real Nintendo storage CDN does (single-shot per asset) and the
+	// extra per-request TLS handshake is cheap against localhost. The earlier
+	// note in this block about keep-alive was about the UPLOAD path (multipart
+	// POST sequence) which is a separate problem we already fixed via the form
+	// 'key' field — that comment is stale.
+	srv.SetKeepAlivesEnabled(false)
 	fmt.Printf("[SMM2 Storage] listening HTTPS :%d (blob store)\n", storagePort)
 	if err := srv.ListenAndServeTLS(certFile, keyFile); err != nil {
 		fmt.Printf("[SMM2 Storage] stopped: %v\n", err)
