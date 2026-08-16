@@ -382,6 +382,135 @@ func smm2SearchCoursesLatest(conn *nex.Connection, req *nex.RMCMessage) *nex.RMC
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
 }
 
+// smm2SearchCoursesHot handles search_courses_hot(84) — the "Hot/Popular Courses"
+// tab in Course World. NOT documented in NintendoClients (same undocumented
+// territory as 58/72/83, which all populate the same Course World Hub).
+//
+// Request shape is unknown. Observed in a real capture (call=66, len=14):
+//   [u8 ver=0] [u32 substream_len=9] [9 bytes: ff 01 00 00 64 00 00 00 04]
+// Best guess: u32 option/filter=0x1ff, u32 count=100, u8 difficulty=4
+// (or game_style=4, or some other filter — we don't act on any of them
+// here, we just consume the body to advance the stream).
+//
+// Response shape mirrors 73/74: list<CourseInfo> + bool result. Courses are
+// sorted by a coarse "hotness" score (likes + hearts + plays, descending),
+// newest first as tiebreaker. The listAllReadyByHotness helper in
+// smm2_storage.go does the actual sort under the courseStore mutex.
+//
+// Previously this was a stub returning an empty list, so the "Hot Courses"
+// tab was always empty (no error, just nothing to show). Now wired with
+// real data and the same buildCourseInfo that 73 has already confirmed
+// working (byte-for-byte identical CourseInfo blobs).
+func smm2SearchCoursesHot(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
+	s := conn.Settings
+	// Consume the unknown request body so the stream stays aligned if the
+	// client ever sends a longer body (defensive). The exact fields don't
+	// matter for our response — we return ALL Ready courses sorted by
+	// hotness, with a hard cap of 100 (same limit as 73).
+	in := nex.NewStreamIn(req.Body, s)
+	_ = in.U8() // param struct version
+	_ = in.Substream() // unknown shape, just consume
+
+	list := courses.listAllReadyByHotness(100)
+
+	out := nex.NewStreamOut(s)
+	out.U32(uint32(len(list))) // list<CourseInfo>
+	for _, m := range list {
+		ci := buildCourseInfo(s, m)
+		out.Write(ci)
+	}
+	out.Bool(true) // result
+
+	fmt.Printf("[SMM2 Courses] search_courses_hot(84) pid=%d -> %d course(s) sorted by hotness\n", conn.PID, len(list))
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
+}
+
+// smm2SearchCoursesByMethod72 handles the undocumented method 72 — the third
+// Course World tab (between "New" and "Hot"). Same response shape as 73/74:
+// list<CourseInfo> + bool result.
+//
+// NOT documented in NintendoClients (same undocumented territory as 58/72/83/84,
+// all of which populate the Course World Hub). Observed in a real capture
+// (call=120, len=52): the request body has 47 unknown bytes — u32 bitmask
+// (0x1ff?), u32 count_limit (100), u8 filter (4), u32 unk (0xffff), u32
+// bitmask_len (16), a 16-byte bitmask (0x01..0x0f), and 3 trailing u8s (0,1,4).
+// Best guess: a "by tag / by region / by skill level" filter we don't act on.
+//
+// For now we ignore the filter fields and return ALL Ready courses sorted
+// by created_at desc (same as search_courses_latest(73) — "newest first"),
+// with a hard cap of 100. If the user later wants a different sort or
+// real filter handling, the shape to change is one line: `list := courses.XXX(100)`.
+//
+// Previously a stub returning `u32 0; u8 true` — the tab always showed nothing
+// (no error, just no courses). Now wired with real data.
+func smm2SearchCoursesByMethod72(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
+	s := conn.Settings
+	// Consume the unknown request body to keep the stream aligned.
+	in := nex.NewStreamIn(req.Body, s)
+	_ = in.U8() // param struct version
+	_ = in.Substream() // unknown shape, just consume
+
+	list := courses.listAllReady(100) // same helper as 73, newest first
+
+	out := nex.NewStreamOut(s)
+	out.U32(uint32(len(list)))
+	for _, m := range list {
+		out.Write(buildCourseInfo(s, m))
+	}
+	out.Bool(true)
+
+	fmt.Printf("[SMM2 Courses] search_courses_method72(72) pid=%d -> %d course(s) newest first\n", conn.PID, len(list))
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
+}
+
+// smm2SearchCoursesLeaderboard handles the undocumented method 58 — the
+// "Leaderboards / Course Markers" tab in Course World. NOT documented in
+// NintendoClients (same undocumented territory as 72/83/84).
+//
+// Response shape is the wider "ranking" format: list<CourseInfo> +
+// list<u32> ranks + bool result. Each rank u32 corresponds 1:1 with a
+// CourseInfo — the client uses them to render the leaderboard position
+// next to each course row.
+//
+// Sort: by hotness (likes + hearts + plays, descending), same helper as
+// 84. Ranks: 1-indexed position in the sorted list, so the top course
+// gets rank=1, the next gets rank=2, etc. (We don't have an actual play-
+// time / score ranking system, so "popularity rank" is a reasonable
+// proxy for "leaderboard position" until a real one gets implemented.)
+//
+// Previously a stub returning `u32 0; u32 0; u8 true` — the tab always
+// showed nothing (no error, just no courses). Now wired with real data.
+func smm2SearchCoursesLeaderboard(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
+	s := conn.Settings
+	// Consume the unknown request body to keep the stream aligned.
+	in := nex.NewStreamIn(req.Body, s)
+	_ = in.U8() // param struct version
+	_ = in.Substream() // unknown shape, just consume
+
+	list := courses.listAllReadyByHotness(100)
+
+	out := nex.NewStreamOut(s)
+	out.U32(uint32(len(list))) // list<CourseInfo>
+	for _, m := range list {
+		out.Write(buildCourseInfo(s, m))
+	}
+	out.U32(uint32(len(list))) // list<u32> ranks, 1:1 with CourseInfo
+	for range list {
+		// We don't have a real ranking system (no play times, no scores),
+		// so every course's "rank" is 0 ("no rank assigned yet"). The client
+		// can use this to render an em-dash or "—" next to each entry, or
+		// to fall back to the order in the courses list. 1-indexed ranks
+		// (1=top) was tried first but the client returned a "communication
+		// error" — the rank value 0 is more conservative and matches the
+		// semantic of "no leaderboard activity for this course".
+		out.U32(0)
+	}
+	out.Bool(true) // result
+
+	fmt.Printf("[SMM2 Courses] search_courses_leaderboard(58) pid=%d -> %d course(s) with ranks\n", conn.PID, len(list))
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
+}
+
 // smm2GetReqGetInfoHeadersInfo handles get_req_get_info_headers_info(134). Per
 // NintendoClients: takes a single "type" byte (matching RelationObjectReqGetInfo's
 // data_type — the client sent 1 for our one_screen/entire thumbnails right after the

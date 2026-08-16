@@ -229,6 +229,39 @@ func (c *courseStore) listAllReady(limit int) []*courseMeta {
 	return ready
 }
 
+// listAllReadyByHotness returns every Ready course from every owner, sorted by a
+// simple "hotness" score (likes + hearts + plays, descending), newest as tiebreaker.
+// Used by the undocumented method 84 ("Hot Courses" in Course World) — not in the
+// official datastore_smm2 method list at all (same undocumented territory as 58/72/83,
+// which populate the same Hub), but structurally we're reusing the same buildCourseInfo
+// already confirmed working via search_courses_latest(73).
+func (c *courseStore) listAllReadyByHotness(limit int) []*courseMeta {
+	c.mu.Lock()
+	ready := make([]*courseMeta, 0, len(c.byID))
+	for _, m := range c.byID {
+		if m.Ready {
+			ready = append(ready, m)
+		}
+	}
+	c.mu.Unlock()
+	hotness := func(m *courseMeta) uint64 {
+		return uint64(m.LikeCount) + uint64(m.HeartCount) + uint64(m.PlayCount)
+	}
+	for i := 1; i < len(ready); i++ {
+		for j := i; j > 0; j-- {
+			hj, hj1 := hotness(ready[j]), hotness(ready[j-1])
+			if hj1 > hj || (hj1 == hj && ready[j-1].CreatedAt >= ready[j].CreatedAt) {
+				break
+			}
+			ready[j-1], ready[j] = ready[j], ready[j-1]
+		}
+	}
+	if limit > 0 && len(ready) > limit {
+		ready = ready[:limit]
+	}
+	return ready
+}
+
 // listByOwnerReady returns every Ready course owned by ownerPID, sorted newest
 // first. Used by SearchCoursesPostedBy(74) — "courses posted by player X", which is
 // what the maker profile's "My courses" tab (or another player's profile page)

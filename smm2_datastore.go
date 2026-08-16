@@ -233,6 +233,29 @@ func smm2DataStoreHandler() nex.RMCHandler {
 			// and a ResultRange pagination window; we treat the first pid as the
 			// owner (SMM2 sends one at a time in practice).
 			return smm2SearchCoursesPostedBy(conn, req)
+		case 84:
+			// search_courses_hot: "Hot/Popular Courses" tab in Course World.
+			// NOT documented in NintendoClients (same undocumented territory as 58/72/83
+			// which populate the same Hub). Previously fell through to smm2EmptyBuilders
+			// and returned just `u32 0` (empty list) — meaning the tab always showed
+			// nothing, no error, just no courses. Now wired with the same buildCourseInfo
+			// used by 73/74, sorted by hotness (likes+hearts+plays) instead of by date.
+			return smm2SearchCoursesHot(conn, req)
+		case 72:
+			// search_courses_method72: third Course World tab (between "New" and "Hot").
+			// NOT documented. Same response shape as 73/74: list<CourseInfo> + bool.
+			// Previously returned `u32 0; u8 true` (empty). Now wired with real data,
+			// sorted newest first (same as 73) — switch to a different sort if the
+			// tab turns out to need popularity/region/tag filtering.
+			return smm2SearchCoursesByMethod72(conn, req)
+		case 58:
+			// search_courses_leaderboard: "Leaderboards / Course Markers" tab in
+			// Course World. NOT documented. Response shape is the wider "ranking"
+			// format: list<CourseInfo> + list<u32> ranks + bool result. Previously
+			// fell through to smm2EmptyBuilders and returned all-zero (no error, just
+			// no courses). Now wired with the same buildCourseInfo, sorted by hotness
+			// (likes+hearts+plays) with 1-indexed rank values per course.
+			return smm2SearchCoursesLeaderboard(conn, req)
 		case 134:
 			// get_req_get_info_headers_info: the client calls this before actually
 			// fetching a relation object (thumbnail) over HTTP — confirmed via a real
