@@ -55,6 +55,17 @@ var smm2EmptyBuilders = map[uint32]func(*nex.StreamOut){
 	160: func(o *nex.StreamOut) { o.U32(0); o.U32(0) },           // get_world_map: maps[], results[]
 	162: func(o *nex.StreamOut) { o.U32(0) },                     // search_world_map_pick_up: maps[]
 
+	// (103) get_death_positions: data_id:int -> list[DeathPositionInfo]. DOCUMENTED
+	// (nintendoclients.readthedocs.io) but never implemented — fell through to
+	// NotFound. New lead from the user: the "Uploaded Courses" view (your OWN
+	// courses) shows a "View Deaths" button that "New Courses" (other players')
+	// doesn't — the client may eagerly query this for owner-only courses while
+	// building that list/detail view, and an unimplemented NotFound there could be
+	// exactly what crashes rendering (matches the reported "spinner then instant
+	// fail, nothing shown" symptom). We have no death-position data to report, so
+	// an empty list is the correct honest answer regardless.
+	103: func(o *nex.StreamOut) { o.U32(0) },                     // get_death_positions: list<DeathPositionInfo>
+
 	// --- Leaderboard-facing methods, per kinnay/NintendoClients wiki (Data-Store-Protocol SMM2) —
 	//     none were implemented before, so Leaderboards fell through to NotFound. Same "empty
 	//     tuple" pattern; a List<UserInfo> and a List<CourseInfo> both encode as U32(0) when empty,
@@ -156,6 +167,24 @@ func smm2DataStoreHandler() nex.RMCHandler {
 		// these three are ruled out and the search moves elsewhere.
 		if req.Method == 63 || req.Method == 65 || req.Method == 129 {
 			fmt.Printf("[SMM2 DataStore] method %d pid=%d -> ack (sin params, patrón \"sin retorno\", no verificado)\n", req.Method, conn.PID)
+			return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
+		}
+
+		// (61) — NOT in the official datastore_smm2 method list at all. Content-guessing on
+		// this one has been exhausted: THREE different response shapes tried (empty ack,
+		// U32(0), Bool(true)) and ALL THREE fail identically — same "communication error"
+		// popup after starting to play any course (own or someone else's), confirmed via
+		// real captures each time with the actual bytes on the wire. Since varying the
+		// RESPONSE content made zero difference across three genuinely different shapes,
+		// the response content is very likely NOT the actual blocker — something else in
+		// the client's own state, timing, or a step we haven't identified is failing
+		// independent of what we answer here. Leaving this as a plain empty ack (the
+		// simplest of the three, no better or worse than the others) and treating this as
+		// a known, unresolved limitation until a real capture or client-side reference
+		// turns up — same wall as the thumbnails issue. Do not keep guessing content here
+		// without new evidence.
+		if req.Method == 61 {
+			fmt.Printf("[SMM2 DataStore] method 61 pid=%d -> ack vacío (3 formas de respuesta probadas, ninguna cambió el resultado — límite conocido)\n", conn.PID)
 			return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
 		}
 

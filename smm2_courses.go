@@ -15,6 +15,8 @@ package main
 //     wiki — kinnay was wrong here)
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"strings"
@@ -22,6 +24,17 @@ import (
 
 	nex "github.com/NextendoNetwork/nextendo-nex"
 )
+
+// courseInfoHash returns a short (first 8 hex chars of sha256) fingerprint of a
+// CourseInfo blob — lets us confirm with certainty, not eyeballing, whether the
+// SAME course's bytes are byte-for-byte identical across two different response
+// paths (e.g. search_courses_latest(73) vs search_courses_posted_by(74)), which
+// read the exact same buildCourseInfo() source but were never directly diffed
+// against each other at the byte level for the SAME data_id in the SAME session.
+func courseInfoHash(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:4])
+}
 
 // unixToDateTime converts a Unix timestamp (seconds) to a packed NEX DateTime u64.
 // NEX DateTime packs year/month/day/hour/min/sec into a 64-bit value via
@@ -220,7 +233,20 @@ func buildCourseInfo(s *nex.Settings, m *courseMeta) []byte {
 	out.U8(m.GameStyle)                // game_style (0-based: 0=SMB1, 1=SMB3, 2=SMW, 3=NSMBU)
 	out.U8(m.CourseTheme)              // course_theme (0-based per style)
 	out.DateTime(unixToDateTime(m.CreatedAt)) // upload_time
-	out.U8(m.Difficulty)               // difficulty (0=Easy, 1=Normal, 2=Expert, 3=SuperExpert)
+	// difficulty: CLAMPED to the documented 0-3 range (CourseDifficulty: EASY=0,
+	// STANDARD=1, EXPERT=2, SUPER_EXPERT=3). catalog.json has several real entries
+	// with difficulty=5 (from an earlier, still-unfixed parse bug in
+	// parsePreparePostCourseParam) — an out-of-range enum value here is a real,
+	// concrete candidate for a client-side crash while rendering the list (array
+	// index out of bounds against a 4-entry difficulty-icon/name table), matching
+	// exactly what was reported: spinner shows, then "communication error" with
+	// NOTHING ever rendered — consistent with the client failing mid-render rather
+	// than mid-network-call.
+	difficulty := m.Difficulty
+	if difficulty > 3 {
+		difficulty = 0
+	}
+	out.U8(difficulty)                 // difficulty (0=Easy, 1=Normal, 2=Expert, 3=SuperExpert)
 	out.U8(tag1)                       // tag1
 	out.U8(tag2)                       // tag2
 	out.U8(0)                          // unk1
@@ -343,7 +369,12 @@ func smm2SearchCoursesLatest(conn *nex.Connection, req *nex.RMCMessage) *nex.RMC
 	out := nex.NewStreamOut(s)
 	out.U32(uint32(len(list))) // list<CourseInfo>
 	for _, m := range list {
-		out.Write(buildCourseInfo(s, m))
+		ci := buildCourseInfo(s, m)
+		out.Write(ci)
+		// DEBUG: fingerprint each CourseInfo so we can directly compare against the
+		// SAME data_id's bytes when it also appears in search_courses_posted_by(74) —
+		// same source code, never actually byte-diffed against each other before.
+		fmt.Printf("[SMM2 Courses]   73 data_id=%d hash=%s len=%d\n", m.DataID, courseInfoHash(ci), len(ci))
 	}
 	out.Bool(true) // result
 
@@ -421,13 +452,26 @@ func smm2SearchCoursesPostedBy(conn *nex.Connection, req *nex.RMCMessage) *nex.R
 	out := nex.NewStreamOut(s)
 	out.U32(uint32(len(page)))
 	for _, m := range page {
-		out.Write(buildCourseInfo(s, m))
+		ci := buildCourseInfo(s, m)
+		out.Write(ci)
+		// DEBUG: same fingerprint as 73's, for direct cross-comparison of the SAME
+		// data_id's bytes between the two paths within the same test session.
+		fmt.Printf("[SMM2 Courses]   74 data_id=%d hash=%s len=%d\n", m.DataID, courseInfoHash(ci), len(ci))
 	}
+	// PROBADO Y DESCARTADO (4 variantes de contenido para 74, todas fallan igual):
+	// ack totalmente vacío, U32(0) solo, U32(0)+Bool(true), U32(0)+Bool(false).
+	// Repuesto Bool(true), la forma correcta según la doc oficial — ver memoria del
+	// proyecto para el cierre completo de esta investigación.
 	out.Bool(true)
+
+	respBytes := out.Bytes()
+	// DEBUG: full raw hex of the outgoing response body (pre-RMC-envelope), so it can
+	// be pasted back for a byte-level review without needing another packet capture.
+	fmt.Printf("[SMM2 Courses]   74 RAW RESPONSE HEX (%d bytes): %s\n", len(respBytes), hex.EncodeToString(respBytes))
 
 	fmt.Printf("[SMM2 Courses] search_courses_posted_by(74) pid=%d owner=%d offset=%d size=%d -> %d/%d course(s)\n",
 		conn.PID, ownerPID, offset, size, len(page), len(list))
-	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, respBytes)
 }
 
 // parseSearchCoursesPostedByParam decodes the SearchCoursesPostedByParam body.
@@ -437,14 +481,28 @@ func smm2SearchCoursesPostedBy(conn *nex.Connection, req *nex.RMCMessage) *nex.R
 // Per NintendoClients/datastore_smm2.py:1619:
 //
 //	stream.u32(option)
-//	stream.extract(ResultRange)  // u32 offset, u32 size
+//	stream.extract(ResultRange)  // FRAMED substructure: [u8 version][u32 length][u32 offset][u32 size]
 //	stream.list(stream.u64)      // pids
+//
+// FIX: ResultRange is an embedded Structure, same as CourseTimeStats and
+// RelationObjectReqGetInfo elsewhere in this file — it carries its OWN
+// [version][length] framing on the wire, not just its two raw u32 fields. This
+// parser was reading offset/size directly after option, skipping that 5-byte
+// frame entirely. Confirmed via a real capture and manual decode: the actual
+// bytes at that position were version=0, length=8 (0x00 08000000), THEN
+// offset=0, size=100 — our old code read the length field's bytes AS offset
+// (unpacking to 2048) and the real offset/size bytes as the pid-list count
+// (25600), so the real pid (1800000001, an account that owns 6 Ready courses)
+// was never even reached — explaining the spurious "0 courses" for
+// SearchCoursesPostedBy(74) even for an account with real uploads.
 func parseSearchCoursesPostedByParam(s *nex.Settings, body []byte) (ownerPID uint64, offset, size uint32) {
 	defer func() { recover() }()
 	in := nex.NewStreamIn(body, s)
 	_ = in.U8() // SearchCoursesPostedByParam struct version
 	sub := in.Substream()
 	_ = sub.U32() // option (ignored: we don't filter on it)
+	_ = sub.U8()  // ResultRange: version byte
+	_ = sub.U32() // ResultRange: length (always 8 for {offset,size} — not used, we know the shape)
 	offset = sub.U32()
 	size = sub.U32()
 	n := sub.U32()
