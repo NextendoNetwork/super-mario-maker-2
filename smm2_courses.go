@@ -224,8 +224,7 @@ func buildCourseInfo(s *nex.Settings, m *courseMeta) []byte {
 	// which made the client skip the download entirely. The path matches what OCW emits
 	// ("/one_screen_thumbnail/<id>" and "/entire_thumbnail/<id>"); thumbnailHandler in
 	// smm2_storage.go serves both from smm2_objects/courses/<id>/thumb{1,2}.jpg.
-	thumb1URL = fmt.Sprintf("%s/one_screen_thumbnail/%d", storageURL, m.DataID)
-	thumb2URL = fmt.Sprintf("%s/entire_thumbnail/%d", storageURL, m.DataID)
+	thumb1URL, thumb2URL = thumbURLsForCourse(m)
 
 	out := nex.NewStreamOut(s)
 	out.U64(m.DataID)                  // data_id
@@ -425,7 +424,24 @@ func smm2SearchCoursesHot(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMes
 	out.Bool(true) // result
 
 	fmt.Printf("[SMM2 Courses] search_courses_hot(84) pid=%d -> %d course(s) sorted by hotness\n", conn.PID, len(list))
+	for _, m := range list {
+		thumb1, thumb2 := thumbURLsForCourse(m)
+		sz1 := relationSizeOnDisk(m.DataID, 1)
+		sz2 := relationSizeOnDisk(m.DataID, 2)
+		fmt.Printf("[SMM2 Courses]   data_id=%d thumb1=%s (size=%d) thumb2=%s (size=%d)\n",
+			m.DataID, thumb1, sz1, thumb2, sz2)
+	}
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
+}
+
+// thumbURLsForCourse returns the one_screen_thumbnail and entire_thumbnail URLs
+// for a course. Both URLs are always populated — the thumbnailHandler in
+// smm2_storage.go returns 404 if the underlying file is missing, but the client
+// expects to issue the GET regardless. Single source of truth so buildCourseInfo
+// and the per-method log lines stay in sync.
+func thumbURLsForCourse(m *courseMeta) (string, string) {
+	return fmt.Sprintf("%s/one_screen_thumbnail/%d", storageURL, m.DataID),
+		fmt.Sprintf("%s/entire_thumbnail/%d", storageURL, m.DataID)
 }
 
 // smm2SearchCoursesByMethod72 handles the undocumented method 72 — the third
