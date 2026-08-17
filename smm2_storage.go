@@ -463,6 +463,15 @@ func courseDir(dataID uint64) string {
 	return filepath.Join(storageDir, "courses", strconv.FormatUint(dataID, 10))
 }
 
+// thumbPath returns the on-disk path of a course thumbnail (type 1 = one_screen,
+// type 2 = entire). Returns "" if relType is not 1 or 2.
+func thumbPath(dataID uint64, relType uint32) string {
+	if relType != 1 && relType != 2 {
+		return ""
+	}
+	return filepath.Join(courseDir(dataID), fmt.Sprintf("thumb%d.jpg", relType))
+}
+
 // relationBaseName maps a PrepareRelationUpload "type" to its filename within a
 // course's directory. Returns "" for an unrecognized type.
 func relationBaseName(relType uint32) string {
@@ -576,6 +585,8 @@ func startStorageServer() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/object/", objectHandler)
 	mux.HandleFunc("/relation/", relationHandler)
+	mux.HandleFunc("/one_screen_thumbnail/", thumbnailHandler(1))
+	mux.HandleFunc("/entire_thumbnail/", thumbnailHandler(2))
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
 	// S3-style presigned-POST upload: SMM2 uploads a course (method 66 = level data,
 	// 132 = thumbnails) as a multipart/form-data POST carrying a `key` + `file`, exactly
@@ -839,3 +850,46 @@ func readAllLimited(r *http.Request, max int64) ([]byte, error) {
 // nowUnix returns the current unix time (isolated so the rest of the file has no
 // direct time import churn).
 func nowUnix() int64 { return time.Now().Unix() }
+
+// thumbnailHandler returns a GET handler that serves a course thumbnail (type 1 =
+// one_screen_thumbnail, type 2 = entire_thumbnail) from smm2_objects/courses/<id>/thumbN.jpg.
+// The console hits this URL after parsing the URL out of each CourseInfo.relation in
+// the search_courses_* (73/74/84) responses; without this handler the GET 404s and
+// no thumbs show up in the Hub. The same chunked + u-header envelope as /object/ is used
+// so a future SCDL-style decrypt path is straightforward to add.
+func thumbnailHandler(relType uint32) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.Error(w, "method", http.StatusMethodNotAllowed)
+			return
+		}
+		idStr := strings.TrimPrefix(r.URL.Path, "/")
+		// strip the leading folder name so the trailing segment is just the data_id
+		if relType == 1 {
+			idStr = strings.TrimPrefix(idStr, "one_screen_thumbnail/")
+		} else {
+			idStr = strings.TrimPrefix(idStr, "entire_thumbnail/")
+		}
+		if i := strings.IndexAny(idStr, "/?"); i >= 0 {
+			idStr = idStr[:i]
+		}
+		dataID, err := strconv.ParseUint(idStr, 10, 64)
+		if err != nil {
+			http.Error(w, "bad data_id", http.StatusBadRequest)
+			return
+		}
+		p := thumbPath(dataID, relType)
+		b, err := os.ReadFile(p)
+		if err != nil {
+			fmt.Printf("[SMM2 Storage] GET thumb%d /%d -> 404 (%v)\n", relType, dataID, err)
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Header().Set("Content-Length", strconv.Itoa(len(b)))
+		fmt.Printf("[SMM2 Storage] GET thumb%d /%d -> %d bytes\n", relType, dataID, len(b))
+		if r.Method == http.MethodGet {
+			w.Write(b)
+		}
+	}
+}

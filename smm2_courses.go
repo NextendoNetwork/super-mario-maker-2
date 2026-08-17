@@ -217,12 +217,14 @@ func buildCourseInfo(s *nex.Settings, m *courseMeta) []byte {
 	// would have hit a 404 + octet-stream even after a successful upload.
 	thumb1URL := ""
 	thumb2URL := ""
-	if sz := relationSizeOnDisk(m.DataID, 1); sz > 0 {
-		thumb1URL = fmt.Sprintf("%s/relation/%d/%d", storageURL, m.DataID, uint32(1))
-	}
-	if sz := relationSizeOnDisk(m.DataID, 2); sz > 0 {
-		thumb2URL = fmt.Sprintf("%s/relation/%d/%d", storageURL, m.DataID, uint32(2))
-	}
+	// Build thumb URLs unconditionally — the client uses them to drive the next HTTP GET,
+	// even when the on-disk blob is missing (in which case the HTTP handler returns 404
+	// and the client shows a placeholder). Gating on sz>0 used to leave the URL empty,
+	// which made the client skip the download entirely. The path matches what OCW emits
+	// ("/one_screen_thumbnail/<id>" and "/entire_thumbnail/<id>"); thumbnailHandler in
+	// smm2_storage.go serves both from smm2_objects/courses/<id>/thumb{1,2}.jpg.
+	thumb1URL = fmt.Sprintf("%s/one_screen_thumbnail/%d", storageURL, m.DataID)
+	thumb2URL = fmt.Sprintf("%s/entire_thumbnail/%d", storageURL, m.DataID)
 
 	out := nex.NewStreamOut(s)
 	out.U64(m.DataID)                  // data_id
