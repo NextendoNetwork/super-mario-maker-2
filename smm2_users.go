@@ -716,6 +716,15 @@ func smm2GetUsersFromProfiles(conn *nex.Connection, req *nex.RMCMessage) *nex.RM
 		}
 		if r != nil {
 			users = append(users, syntheticUserInfoFromProfile(s, lookupPID, r))
+		} else {
+			// PID not registered: emit a complete-but-empty UserInfo placeholder so the
+			// response count matches the request count. Without positional alignment the
+			// client (e.g. when asking for the full author list of New/Hot Courses, ~114
+			// PIDs in one call) ends up in an invalid session state and triggers a phantom
+			// m=61 ack loop. syntheticUserInfoFromProfile(s, pid, nil) already produces
+			// a version-0 UserInfo with every documented field present and empty, which
+			// is the smallest wire-compatible answer for an unknown PID.
+			users = append(users, syntheticUserInfoFromProfile(s, pid, nil))
 		}
 	}
 
