@@ -286,6 +286,13 @@ func smm2DataStoreHandler() nex.RMCHandler {
 			// response is u32(0) (no deaths recorded for this course yet). Sending
 			// NotFound here would also abort the flow.
 			return smm2GetDeathPositions(conn, req)
+		case 22:
+			// (22) TOUCH_OBJECT — kinnay-indexed, "marks the object as viewed/touched".
+			// The client calls it right when a play session starts (or when the
+			// course detail is opened). We bump PlayCount by 1 and ack with no
+			// return value. Future client sessions can then read the bumped count
+			// back via CourseInfo.play_stats.
+			return smm2TouchObject(conn, req)
 		}
 
 		if build, ok := smm2EmptyBuilders[req.Method]; ok {
@@ -361,4 +368,30 @@ func smm2GetDeathPositions(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMe
 	fmt.Printf("[SMM2 DataStore] get_death_positions(103) pid=%d course_id=0x%x -> empty list\n",
 		conn.PID, courseID)
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
+}
+
+// smm2TouchObject (22) — kinnay-indexed as "TOUCH_OBJECT" (fire-and-forget
+// "mark the object as viewed/touched"). The client calls it when a play
+// session starts; we bump PlayCount by 1 and ack with no return value. The
+// next time the client reads CourseInfo (m=70/73/74/84), play_stats[0] will
+// reflect the bumped value.
+//
+// Request shape per kinnay/datastore.py TouchObject: takes a single u64
+// data_id, framed the standard NEX way. We accept the data_id in the
+// substream (whatever version byte kinnay emits today); if parsing fails the
+// substream is empty and we still ack.
+func smm2TouchObject(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
+	s := conn.Settings
+	var dataID uint64
+	if len(req.Body) > 0 {
+		defer func() { recover() }()
+		in := nex.NewStreamIn(req.Body, s)
+		_ = in.U8() // version
+		sub := in.Substream()
+		dataID = sub.U64()
+	}
+	courses.applyPlayed(dataID, 1, 0, 0, 0) // +1 play
+	fmt.Printf("[SMM2 DataStore] touch_object(22) pid=%d data_id=%d -> play_count++ (ack)\n",
+		conn.PID, dataID)
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
 }
