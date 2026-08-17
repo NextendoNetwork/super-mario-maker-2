@@ -15,6 +15,7 @@ package main
 //     wiki — kinnay was wrong here)
 
 import (
+	"crypto/md5"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -540,20 +541,29 @@ func smm2GetReqGetInfoHeadersInfo(conn *nex.Connection, req *nex.RMCMessage) *ne
 		reqType = req.Body[0]
 	}
 
-	// TEST PROBE: hardcode a recognisable "u" so we can see whether the OCW mod
-	// uses this value in the subsequent HTTP GET (path B) or computes it itself
-	// from the NEX token (path A). See captured OCW trace — real value would be
-	// MD5(NEXToken) = 69d38f81fb8d2b9979a64e47fbcc5524.
-	const probeU = "deadbeef00000000deadbeef00000000"
+	// The "u" header is MD5(NEXToken), exactly as the client computes it locally.
+	// If the server returns a different value the client-side validation aborts the
+	// connection without even attempting the subsequent HTTP GET to the thumbnail
+	// endpoint (confirmed by probe commit 06dc0af: hardcoding "u=deadbeef..." caused
+	// the emulator to disconnect ~8s later, no GET ever fired). So the only safe
+	// value to return is the real one.
+	u := md5Hex(conn.NEXToken)
 
 	out := nex.NewStreamOut(s)
-	out.U32(1)            // DataStoreKeyValue count
-	out.String("u")       // key
-	out.String(probeU)    // value (the "u" the client will use in the next HTTP GET)
-	out.U32(60)           // expiration: 60s (matches OCW behaviour, not 0x7FFFFFFF)
+	out.U32(1)         // DataStoreKeyValue count
+	out.String("u")    // key
+	out.String(u)      // value = MD5(NEXToken)
+	out.U32(60)        // expiration: 60s (matches OCW behaviour; we don't expire GET access)
 
-	fmt.Printf("[SMM2 Courses] get_req_get_info_headers_info(134) pid=%d type=%d -> PROBE u=%s expiration=60s\n", conn.PID, reqType, probeU)
+	fmt.Printf("[SMM2 Courses] get_req_get_info_headers_info(134) pid=%d type=%d -> u=%s expiration=60s\n", conn.PID, reqType, u)
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
+}
+
+// md5Hex returns the lowercase hex MD5 of s. Kept in this file (rather than the
+// library) so the handler can be read in isolation.
+func md5Hex(s string) string {
+	sum := md5.Sum([]byte(s))
+	return hex.EncodeToString(sum[:])
 }
 
 // smm2SearchCoursesPostedBy handles search_courses_posted_by(74) — the "courses
