@@ -540,11 +540,19 @@ func smm2GetReqGetInfoHeadersInfo(conn *nex.Connection, req *nex.RMCMessage) *ne
 		reqType = req.Body[0]
 	}
 
-	out := nex.NewStreamOut(s)
-	writeKeyValueList(out, nil) // headers: none needed for our own object store
-	out.U32(0x7FFFFFFF)         // expiration: far future (we don't expire GET access)
+	// TEST PROBE: hardcode a recognisable "u" so we can see whether the OCW mod
+	// uses this value in the subsequent HTTP GET (path B) or computes it itself
+	// from the NEX token (path A). See captured OCW trace — real value would be
+	// MD5(NEXToken) = 69d38f81fb8d2b9979a64e47fbcc5524.
+	const probeU = "deadbeef00000000deadbeef00000000"
 
-	fmt.Printf("[SMM2 Courses] get_req_get_info_headers_info(134) pid=%d type=%d -> empty headers, no expiration\n", conn.PID, reqType)
+	out := nex.NewStreamOut(s)
+	out.U32(1)            // DataStoreKeyValue count
+	out.String("u")       // key
+	out.String(probeU)    // value (the "u" the client will use in the next HTTP GET)
+	out.U32(60)           // expiration: 60s (matches OCW behaviour, not 0x7FFFFFFF)
+
+	fmt.Printf("[SMM2 Courses] get_req_get_info_headers_info(134) pid=%d type=%d -> PROBE u=%s expiration=60s\n", conn.PID, reqType, probeU)
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
 }
 

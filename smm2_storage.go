@@ -659,7 +659,7 @@ func objectHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Content-Length", strconv.Itoa(len(b)))
-		fmt.Printf("[SMM2 Storage] GET /object/%d -> %d bytes\n", dataID, len(b))
+		fmt.Printf("[SMM2 Storage] GET /object/%d u=%q -> %d bytes\n", dataID, r.Header.Get("u"), len(b))
 		if r.Method == http.MethodGet {
 			w.Write(b)
 		}
@@ -881,13 +881,13 @@ func thumbnailHandler(relType uint32) http.HandlerFunc {
 		p := thumbPath(dataID, relType)
 		b, err := os.ReadFile(p)
 		if err != nil {
-			fmt.Printf("[SMM2 Storage] GET thumb%d /%d -> 404 (%v)\n", relType, dataID, err)
+			fmt.Printf("[SMM2 Storage] GET thumb%d /%d u=%q -> 404 (%v)\n", relType, dataID, r.Header.Get("u"), err)
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
 		w.Header().Set("Content-Type", "image/jpeg")
 		w.Header().Set("Content-Length", strconv.Itoa(len(b)))
-		fmt.Printf("[SMM2 Storage] GET thumb%d /%d -> %d bytes\n", relType, dataID, len(b))
+		fmt.Printf("[SMM2 Storage] GET thumb%d /%d u=%q -> %d bytes\n", relType, dataID, r.Header.Get("u"), len(b))
 		if r.Method == http.MethodGet {
 			w.Write(b)
 		}
