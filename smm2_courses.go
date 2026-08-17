@@ -131,9 +131,19 @@ func filenameFromURL(url string) string {
 }
 
 // writeCourseTimeStats writes a CourseTimeStats substruct per NintendoClients:2308.
-// All zero defaults (no completions, no world record) are a valid SMM2 state.
-func writeCourseTimeStats(out *nex.StreamOut) {
-	out.Add(&courseTimeStatsOut{})
+// Values come from the catalog (m.FirstCompletionPID / WorldRecordHolderPID /
+// WorldRecordFrames) — set by setCourseTimes when the first clear lands. When
+// no clear has happened yet the fields are all zero, which is the documented
+// "no completion / no record" state.
+func writeCourseTimeStats(out *nex.StreamOut, m *courseMeta) {
+	out.Add(&courseTimeStatsOut{
+		firstCompletion:   m.FirstCompletionPID,
+		worldRecordHolder: m.WorldRecordHolderPID,
+		worldRecord:       m.WorldRecordFrames,
+		// uploadTime: kept at 0; buildCourseInfo already writes the catalog's
+		// created_at in DateTime form on the outer CourseInfo (the same
+		// semantic value lives there in the documented field).
+	})
 }
 
 // writeRelationObjectReqGetInfo writes a RelationObjectReqGetInfo per
@@ -267,7 +277,7 @@ func buildCourseInfo(s *nex.Settings, m *courseMeta) []byte {
 	writeU8U32Map(out, buildCoursePlayStatsMap(m))  // play_stats (PlayStatsKeys)
 	writeU8U32Map(out, buildCourseRatingsMap(m))     // ratings (slot 0=like,1=heart,2=boo)
 	writeU8U32Map(out, nil)            // unk4
-	writeCourseTimeStats(out)          // time_stats (substruct)
+	writeCourseTimeStats(out, m)       // time_stats (substruct; from m.FirstCompletionPID etc.)
 	writeU8U32Map(out, m.CommentCounts) // comment_stats (per slot; empty if no comments)
 	out.U8(0)                          // unk9
 	out.U8(0)                          // unk10

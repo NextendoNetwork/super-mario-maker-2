@@ -91,6 +91,19 @@ type courseMeta struct {
 	BoosCount     uint32            `json:"boos_count"`
 	RatingInitial map[uint8]int64   `json:"rating_initial"` // initial_value per slot, set on first rate
 	CommentCounts map[uint8]uint32  `json:"comment_counts"` // comment_stats per slot
+
+	// --- CourseTimeStats (the "world record" substruct SMM2 shows in the detail
+	// screen). Until a real replay-parser lands, these are placeholder values:
+	//   - FirstCompletionPID: the PID of the first player who ever cleared this
+	//     course (set on the first replay upload, frozen thereafter).
+	//   - WorldRecordHolderPID: same as first completion in our placeholder
+	//     model (we don't track per-player best times yet).
+	//   - WorldRecordFrames: 1 for the same reason — a real "best time in
+	//     1/60s frames" needs the replay decoded.
+	// All three stay zero until setCourseTimes fires for the first time.
+	FirstCompletionPID  uint64 `json:"first_completion_pid,omitempty"`
+	WorldRecordHolderPID uint64 `json:"world_record_holder_pid,omitempty"`
+	WorldRecordFrames   uint32 `json:"world_record_frames,omitempty"`
 }
 
 type courseStore struct {
@@ -435,6 +448,28 @@ func (c *courseStore) applyPlayed(dataID uint64, plays, clears, attempts, deaths
 	m.AttemptCount += attempts
 	m.DeathCount += deaths
 	c.persistLocked()
+}
+
+// setCourseTimes records the placeholder world-record stats for a course
+// the first time a player clears it. Subsequent clears DO NOT update the
+// holder (we don't track per-player best times until a replay parser lands),
+// so the "first completion" stays anchored to the very first clearer. The
+// frames field is a placeholder of 1 — a real best time in 1/60s frames
+// requires decoding the clear-check replay (relation type 5) which is
+// unhandled today. Unknown dataIDs are silently ignored.
+func (c *courseStore) setCourseTimes(dataID, playerPID uint64, frames uint32) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	m := c.byID[dataID]
+	if m == nil {
+		return
+	}
+	if m.FirstCompletionPID == 0 {
+		m.FirstCompletionPID = playerPID
+		m.WorldRecordHolderPID = playerPID
+		m.WorldRecordFrames = frames
+		c.persistLocked()
+	}
 }
 
 func blobPath(dataID uint64) string { return filepath.Join(courseDir(dataID), "level.bin") }

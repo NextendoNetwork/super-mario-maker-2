@@ -221,12 +221,38 @@ func smm2PrepareRelationUpload(conn *nex.Connection, req *nex.RMCMessage) *nex.R
 	return nex.NewRMCSuccess(s, 0x73, 132, req.CallID, resp)
 }
 
-// smm2CompletePostRelationObject (133): undocumented in detail, but every other
-// Complete*-style method in this protocol acks with no body — treat it the same way
-// rather than let it fall through to NotFound and stall the upload.
+// smm2CompletePostRelationObject (133): parses [u8 ver][u32 substream][String
+// dataID][u32 relType] (per the kinnay DataStoreRequestInfo shape — the same
+// pattern m=132 reads), records the clear in the catalog if relType=5 (a
+// successful replay upload = a course clear), and acks with no body. Without
+// this parse-and-act step, the play flow's "world record / first completion"
+// fields stay at zero forever — the replay upload HTTP POST is enough to
+// bump the clear counter (relationHandler does that already), but it has no
+// access to the NEX session PID, so the time-stats update needs to happen
+// here where conn.PID is in scope.
 func smm2CompletePostRelationObject(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
 	s := conn.Settings
-	fmt.Printf("[SMM2 Storage] CompletePostRelationObject(133) pid=%d received %d bytes -> ack\n", conn.PID, len(req.Body))
+	var dataID uint64
+	var relType uint32
+	if len(req.Body) > 0 {
+		defer func() { recover() }()
+		in := nex.NewStreamIn(req.Body, s)
+		_ = in.U8()
+		sub := in.Substream()
+		dataID = sub.U64()
+		relType = sub.U32()
+	}
+	if relType == 5 {
+		// Placeholder world-record update: 1 frame = "no real time yet". A
+		// future replay-parser would replace this with the actual clear time
+		// decoded from smm2_objects/courses/<id>/replay.bin.
+		courses.setCourseTimes(dataID, conn.PID, 1)
+		fmt.Printf("[SMM2 Storage] CompletePostRelationObject(133) pid=%d data_id=%d relType=5 -> +1 first-clear stats (placeholder)\n",
+			conn.PID, dataID)
+	} else {
+		fmt.Printf("[SMM2 Storage] CompletePostRelationObject(133) pid=%d data_id=%d relType=%d -> ack\n",
+			conn.PID, dataID, relType)
+	}
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
 }
 
