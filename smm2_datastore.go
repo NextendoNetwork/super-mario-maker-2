@@ -170,22 +170,15 @@ func smm2DataStoreHandler() nex.RMCHandler {
 			return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
 		}
 
-		// (61) — NOT in the official datastore_smm2 method list at all. Content-guessing on
-		// this one has been exhausted: THREE different response shapes tried (empty ack,
-		// U32(0), Bool(true)) and ALL THREE fail identically — same "communication error"
-		// popup after starting to play any course (own or someone else's), confirmed via
-		// real captures each time with the actual bytes on the wire. Since varying the
-		// RESPONSE content made zero difference across three genuinely different shapes,
-		// the response content is very likely NOT the actual blocker — something else in
-		// the client's own state, timing, or a step we haven't identified is failing
-		// independent of what we answer here. Leaving this as a plain empty ack (the
-		// simplest of the three, no better or worse than the others) and treating this as
-		// a known, unresolved limitation until a real capture or client-side reference
-		// turns up — same wall as the thumbnails issue. Do not keep guessing content here
-		// without new evidence.
+		// (61) PrepareGetRelationObject: the download-side counterpart of m=132. Client
+		// sends [u64 dataID, u32 relType] and expects a RelationObjectReqGetInfo back
+		// (kinnay/datastore_smm2.py:2544: {url, data_type, size, unk, filename}) pointing
+		// at /relation/<id>/<relType>. We were returning a void ack — the request shape
+		// was missing entirely, so the client couldn't learn where the relation object
+		// lives and disconnected ~8s later. Real shapes (kinnay spec, not reference) confirmed
+		// via the request bytes captured during a play attempt (callID=52, body=17).
 		if req.Method == 61 {
-			fmt.Printf("[SMM2 DataStore] method 61 pid=%d -> ack vacío (3 formas de respuesta probadas, ninguna cambió el resultado — límite conocido)\n", conn.PID)
-			return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
+			return smm2PrepareGetRelationObject(conn, req)
 		}
 
 		// --- Level storage: real object upload/download on the Nextendo VPS.
@@ -270,6 +263,29 @@ func smm2DataStoreHandler() nex.RMCHandler {
 		case 133:
 			// CompletePostRelationObject: undocumented in detail, acked like its siblings.
 			return smm2CompletePostRelationObject(conn, req)
+		case 152:
+			// (152) — Undocumented in kinnay/NintendoClients. Called by the client
+			// BEFORE m=25 in the play flow (twice in the reference capture, both
+			// with the same 9-byte body). The reference response is a void ack (0-byte
+			// body, success=true). Without this the client fell off the connection
+			// ~8s into the play sequence — NotFound error seems to abort the flow.
+			// Same shape as the "no params, no return" methods (59/68/69/133) that
+			// the rest of the dispatcher treats as void acks.
+			return smm2Method152(conn, req)
+		case 125:
+			// (125) — Undocumented in kinnay/NintendoClients. Called by the client
+			// right after m=152 in the play flow, with an empty body. The reference
+			// response is 8 bytes: 00 03 00 00 00 00 00 00 — could be u64=0x300=768
+			// or some other field layout, but the byte sequence is verified against
+			// the reference capture. Send the exact same 8 bytes so the client's downstream
+			// parsing lands in the same state.
+			return smm2Method125(conn, req)
+		case 103:
+			// (103) GET_DEATH_POSITIONS — kinnay-indexed, "for retrieving the death
+			// positions recorded for a course". In the play flow the reference
+			// response is u32(0) (no deaths recorded for this course yet). Sending
+			// NotFound here would also abort the flow.
+			return smm2GetDeathPositions(conn, req)
 		}
 
 		if build, ok := smm2EmptyBuilders[req.Method]; ok {
@@ -292,4 +308,57 @@ func smm2DataStoreHandler() nex.RMCHandler {
 		fmt.Printf("[SMM2 DataStore] 0x73.%d -> replay structurel (%do)\n", req.Method, len(body))
 		return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, body)
 	}
+}
+
+// smm2Method152 (152) — undocumented in kinnay/NintendoClients. In the reference play
+// flow capture the client calls it twice (same 9-byte body both times) BEFORE
+// m=25, and the server returns a void ack both times. The 9-byte body decodes
+// to [u8 ver=0][u32 substream=4][u32 param=0x14B1] — the u32 is probably a
+// session/play ID of some kind, but without a second capture we can't tell
+// exactly what the client does with our response. Void ack is the safe answer
+// because anything else (NotFound error, structured body of wrong shape)
+// reliably aborts the play flow.
+func smm2Method152(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
+	s := conn.Settings
+	in := nex.NewStreamIn(req.Body, s)
+	_ = in.U8()
+	sub := in.Substream()
+	param := sub.U32()
+	fmt.Printf("[SMM2 DataStore] method 152 pid=%d param=0x%x -> ack (no return value, matches the reference)\n",
+		conn.PID, param)
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
+}
+
+// smm2Method125 (125) — undocumented in kinnay/NintendoClients. In the reference
+// play flow capture the client calls it once with an empty body, RIGHT AFTER
+// m=152, and the server returns exactly 8 bytes: 00 03 00 00 00 00 00 00.
+// The most likely layout is u64 LE = 0x0000000000000300 = 768, but the
+// field-shape isn't verified — we send the raw bytes verbatim so the client's
+// downstream parser sees the same wire format the reference does.
+func smm2Method125(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
+	s := conn.Settings
+	out := nex.NewStreamOut(s)
+	out.Write([]byte{0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})
+	fmt.Printf("[SMM2 DataStore] method 125 pid=%d -> 8 bytes (matches the reference: 00 03 00 00 00 00 00 00)\n",
+		conn.PID)
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
+}
+
+// smm2GetDeathPositions (103) — kinnay-indexed as "GET_DEATH_POSITIONS" (for
+// retrieving the death positions recorded for a course). In the reference play
+// flow the request is [u8 ver=0][u32 substream][u64 courseID] and the response
+// is u32(0) — i.e. "no deaths recorded for this course yet". A real response
+// would be a list of {x, y} world-coordinate death positions; for a private
+// server with no recorded deaths, u32(0) (empty list) is correct.
+func smm2GetDeathPositions(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
+	s := conn.Settings
+	in := nex.NewStreamIn(req.Body, s)
+	_ = in.U8()
+	sub := in.Substream()
+	courseID := sub.U64()
+	out := nex.NewStreamOut(s)
+	out.U32(0) // empty list of death positions
+	fmt.Printf("[SMM2 DataStore] get_death_positions(103) pid=%d course_id=0x%x -> empty list\n",
+		conn.PID, courseID)
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
 }

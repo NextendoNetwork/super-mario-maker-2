@@ -230,6 +230,41 @@ func smm2CompletePostRelationObject(conn *nex.Connection, req *nex.RMCMessage) *
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
 }
 
+// smm2PrepareGetRelationObject (61): called by the client right after
+// PrepareGetObject(25) for a course it's about to play. Request shape:
+//   [u8 ver=0][u32 substream=12][u64 dataID][u32 relType]
+// — matches the reference capture byte-for-byte (dataID 0x3B9BE979, relType=3,
+// for an in-game level being played). The reference response is a [u8 ver=0]
+// [u32 body=26] struct frame containing 26 bytes of zero. We don't know the
+// exact field layout inside those 26 bytes — the only verified constraint is
+// that the total is 31 bytes, byte-identical to reference, so the client's downstream
+// parsing lands in the same state. The 26-zero body is most likely an empty
+// "RelationObjectReqGetInfo-shaped" struct (no URL, no filename, all fields = 0):
+// the client reads it as "no relation object available" and moves on, instead
+// of stalling on a missing reference.
+//
+// EARLIER (kinnay guess): we returned a fully-populated RelationObjectReqGetInfo
+// pointing at our own /relation/<id>/<type> — that came straight from the kinnay
+// wiki and matched the upload-side m=132, but turned out to be wrong: the kinnay
+// spec is incomplete here. The reference capture shows the real shape.
+func smm2PrepareGetRelationObject(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
+	s := conn.Settings
+	in := nex.NewStreamIn(req.Body, s)
+	_ = in.U8()           // struct version
+	sub := in.Substream() // u32 length + body
+	dataID := sub.U64()
+	relType := sub.U32()
+
+	// 26 zero bytes inside a [u8 ver=0][u32 body=26] struct frame, matching the
+	// reference response exactly. Don't try to populate fields from kinnay's spec
+	// until we have a second capture to confirm the layout.
+	resp := frameStruct(s, 0, make([]byte, 26))
+
+	fmt.Printf("[SMM2 Storage] PrepareGetRelationObject(61) data_id=%d relType=%d -> 31 bytes (26 zero body, matches the reference)\n",
+		dataID, relType)
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, resp)
+}
+
 // smm2UpdateCourseTag (69): per kinnay's wiki, "this method does not return anything".
 func smm2UpdateCourseTag(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
 	s := conn.Settings
@@ -320,9 +355,23 @@ func smm2PrepareGetObject(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMes
 
 		url := fmt.Sprintf("%s/object/%d", storageURL, dataID)
 		body := nex.NewStreamOut(s)
-		body.String(url)             // url
-		writeKeyValueList(body, nil) // headers: none
-		body.U32(m.Size)             // size
+		body.String(url) // url
+		// headers: must include the same `u=md5(NEXToken)` the client gets from
+		// m=134 — that's the auth token it attaches to the HTTP GET for /object/<id>.
+		// Without it the GET 401s (or 200s with the wrong body on Nintendo-style
+		// servers) and the course blob never reaches the client. Per-element
+		// substream framing is mandatory — the reference response has
+		// [u32 count=1][u8 ver=0][u32 body=39][String "u"][String hex32], the
+		// same shape m=134 emits. Mirror that exactly.
+		const kKey = "u"
+		uHex := md5Hex("4If9rL9JRLMmEvD30GAxDl") // hardcoded for now, see m=134
+		elemBody := uint32(2 + len(kKey) + 1 + 2 + len(uHex) + 1)
+		body.U32(1)        // count
+		body.U8(0)         // element substream version
+		body.U32(elemBody) // element substream length
+		body.String(kKey)
+		body.String(uHex)
+		body.U32(m.Size) // size
 		// root_ca_cert is a Buffer (u32 length prefix + bytes) per
 		// NintendoClients/datastore.py DataStoreReqGetInfo.load — matches
 		// what methods 24/66/132 already emit. Earlier versions wrote
@@ -331,8 +380,8 @@ func smm2PrepareGetObject(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMes
 		// 0x00 in front of an actual 0x03f0 u64) reads back as ~66 MB,
 		// Ryujinx falls into a null-deref when the alloc / read fails.
 		// Buffer is correct; this comment is the receipts.
-		body.Buffer(courses.rootCA)  // root_ca_cert
-		body.U64(dataID)             // data_id
+		body.Buffer(courses.rootCA) // root_ca_cert
+		body.U64(dataID)            // data_id
 		resp := frameStruct(s, 0, body.Bytes())
 		fmt.Printf("[SMM2 Storage] prepare_get(25) data_id=%d -> %s (%d bytes%s)\n",
 			dataID, url, m.Size,
