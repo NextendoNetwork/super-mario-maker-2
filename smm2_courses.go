@@ -221,9 +221,10 @@ func buildCourseInfo(s *nex.Settings, m *courseMeta) []byte {
 	// Build thumb URLs unconditionally — the client uses them to drive the next HTTP GET,
 	// even when the on-disk blob is missing (in which case the HTTP handler returns 404
 	// and the client shows a placeholder). Gating on sz>0 used to leave the URL empty,
-	// which made the client skip the download entirely. The path matches what OCW emits
-	// ("/one_screen_thumbnail/<id>" and "/entire_thumbnail/<id>"); thumbnailHandler in
-	// smm2_storage.go serves both from smm2_objects/courses/<id>/thumb{1,2}.jpg.
+	// which made the client skip the download entirely. The path matches the SMM2
+	// thumbnail URL scheme ("/one_screen_thumbnail/<id>" and "/entire_thumbnail/<id>");
+	// thumbnailHandler in smm2_storage.go serves both from
+	// smm2_objects/courses/<id>/thumb{1,2}.jpg.
 	thumb1URL, thumb2URL = thumbURLsForCourse(m)
 
 	out := nex.NewStreamOut(s)
@@ -550,6 +551,20 @@ func smm2SearchCoursesLeaderboard(conn *nex.Connection, req *nex.RMCMessage) *ne
 // answer here, apparently never proceeds to the actual HTTP GET. Our own object store
 // needs no special headers for a GET, so an empty header list + a far-future
 // expiration is a valid, safe answer.
+//
+// Wire format (m=134 RES body = 57 bytes, derived from a real measured capture):
+//
+//	[u8 ver=0] [u32 structBody=52]            ← ReqGetInfoHeadersInfo struct header
+//	  [u32 count=1]                           ← list<DataStoreKeyValue> count
+//	  [u8 ver=0] [u32 elemBody=39]            ← per-element substream (DataStoreKeyValue is a Structure)
+//	    [u16=2]['u'][0x00]                    ← String("u")
+//	    [u16=33][32 hex chars][0x00]          ← String(u)
+//	  [u32 expiration=60]                     ← ReqGetInfoHeadersInfo.expiration
+//
+// Earlier we wrote only the inner 47 bytes (count + KV strings + expiration, no
+// per-element or outer struct framing), so the client failed to parse the list and
+// disconnected ~8s later when it gave up waiting for the next message. The 10 missing
+// bytes are the outer struct header (5) + the per-element substream header (5).
 func smm2GetReqGetInfoHeadersInfo(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
 	s := conn.Settings
 	var reqType uint8
@@ -562,20 +577,33 @@ func smm2GetReqGetInfoHeadersInfo(conn *nex.Connection, req *nex.RMCMessage) *ne
 	// "Authorize stashed NEX=\"\" (len=0)"), so conn.NEXToken is empty and
 	// MD5(conn.NEXToken) is MD5("") = d41d8cd9... which crashes the emulator
 	// (client rejects any u != MD5(NEXToken)). Until Ryujinx-Nextendo is fixed
-	// to actually emit the header, we hardcode the OCW token the mod uses
+	// to actually emit the header, we hardcode the token the mod uses
 	// (4If9rL9JRLMmEvD30GAxDl, MD5 = 69d38f81fb8d2b9979a64e47fbcc5524) — the
 	// client computes the same value and accepts. Remove this and uncomment the
 	// conn.NEXToken line once Ryujinx-Nextendo is fixed upstream.
 	u := md5Hex("4If9rL9JRLMmEvD30GAxDl")
 	// u := md5Hex(conn.NEXToken)
 
-	out := nex.NewStreamOut(s)
-	out.U32(1)         // DataStoreKeyValue count
-	out.String("u")    // key
-	out.String(u)      // value = MD5(NEXToken)
-	out.U32(60)        // expiration: 60s (matches OCW behaviour; we don't expire GET access)
+	// Layout math: String is u16(length+null) + bytes + null, so for "u" (1 char) we
+	// emit 4 bytes total, and for the 32-char hex MD5 we emit 35 bytes total. The KV
+	// element body is therefore 4 + 35 = 39, the struct body wraps that with the
+	// 4-byte count, 5-byte element substream header and 4-byte expiration = 52.
+	const kKey = "u"
+	elemBody := uint32(2 + len(kKey) + 1 + 2 + len(u) + 1) // String(kKey) + String(u)
+	structBody := uint32(4 + 5 + elemBody + 4)              // count + element substream header + element body + expiration
 
-	fmt.Printf("[SMM2 Courses] get_req_get_info_headers_info(134) pid=%d type=%d -> u=%s expiration=60s\n", conn.PID, reqType, u)
+	out := nex.NewStreamOut(s)
+	out.U8(0)              // ReqGetInfoHeadersInfo struct version
+	out.U32(structBody)    // 52
+	out.U32(1)             // list<DataStoreKeyValue> count
+	out.U8(0)              // DataStoreKeyValue substream version
+	out.U32(elemBody)      // 39
+	out.String(kKey)       // "u"
+	out.String(u)          // MD5(NEXToken) hex
+	out.U32(60)            // expiration: 60s; we don't expire GET access
+
+	fmt.Printf("[SMM2 Courses] get_req_get_info_headers_info(134) pid=%d type=%d -> u=%s expiration=60s (body=%d bytes, structBody=%d, elemBody=%d)\n",
+		conn.PID, reqType, u, len(out.Bytes()), structBody, elemBody)
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
 }
 
