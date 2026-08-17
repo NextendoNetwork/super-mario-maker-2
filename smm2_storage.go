@@ -709,6 +709,16 @@ func relationHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "store failed", http.StatusInternalServerError)
 			return
 		}
+		// A successful clear-check replay upload (relType=5) counts as a clear
+		// for the course. We don't have a "death" upload path yet, so AttemptCount
+		// and DeathCount stay at zero until the client learns to POST a death
+		// marker. PlayCount is bumped separately by touch_object(22) when the
+		// session opens, so the two counters stay in sync with what the client
+		// actually reports.
+		if relType == 5 {
+			courses.applyPlayed(dataID, 0, 1, 0, 0) // +1 clear
+			fmt.Printf("[SMM2 Storage]   -> replay upload = +1 clear for data_id=%d\n", dataID)
+		}
 		sum := md5.Sum(blob)
 		w.Header().Set("ETag", fmt.Sprintf("%q", hex.EncodeToString(sum[:])))
 		w.Header().Set("Server", "AmazonS3")
