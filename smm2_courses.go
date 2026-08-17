@@ -557,13 +557,17 @@ func smm2GetReqGetInfoHeadersInfo(conn *nex.Connection, req *nex.RMCMessage) *ne
 		reqType = req.Body[0]
 	}
 
-	// The "u" header is MD5(NEXToken), exactly as the client computes it locally.
-	// If the server returns a different value the client-side validation aborts the
-	// connection without even attempting the subsequent HTTP GET to the thumbnail
-	// endpoint (confirmed by probe commit 06dc0af: hardcoding "u=deadbeef..." caused
-	// the emulator to disconnect ~8s later, no GET ever fired). So the only safe
-	// value to return is the real one.
-	u := md5Hex(conn.NEXToken)
+	// TEMP HARDCODED: Ryujinx-Nextendo currently doesn't send the "NEX" header in
+	// the WebSocket upgrade request (commit 9a1eced's diag log showed
+	// "Authorize stashed NEX=\"\" (len=0)"), so conn.NEXToken is empty and
+	// MD5(conn.NEXToken) is MD5("") = d41d8cd9... which crashes the emulator
+	// (client rejects any u != MD5(NEXToken)). Until Ryujinx-Nextendo is fixed
+	// to actually emit the header, we hardcode the OCW token the mod uses
+	// (4If9rL9JRLMmEvD30GAxDl, MD5 = 69d38f81fb8d2b9979a64e47fbcc5524) — the
+	// client computes the same value and accepts. Remove this and uncomment the
+	// conn.NEXToken line once Ryujinx-Nextendo is fixed upstream.
+	u := md5Hex("4If9rL9JRLMmEvD30GAxDl")
+	// u := md5Hex(conn.NEXToken)
 
 	out := nex.NewStreamOut(s)
 	out.U32(1)         // DataStoreKeyValue count
