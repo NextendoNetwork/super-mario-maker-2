@@ -28,6 +28,57 @@ go build -o smm2-server .
 ./smm2-server
 ```
 
+## What works
+
+End-to-end flows validated against a real SMM2 capture. Each feature is mapped
+to the NEX method(s) that implement it. ✅ = working as captured; 🟡 = working
+but with a known caveat (see note).
+
+### Course World
+
+| Feature | NEX method(s) | Status |
+|---|---|---|
+| Browse "Hot Courses" | m=84 `search_courses_hot` | ✅ |
+| Browse "New Courses" | m=73 `search_courses_latest` | ✅ |
+| Course detail (full metadata) | m=70 `get_courses` (CourseInfo) | ✅ |
+| Upload course (level + relations) | m=66, m=68, m=132, m=133 + HTTP | ✅ |
+| Play course (download + run) | m=25 (HTTP GET) + m=24/26 (telemetry) | ✅ |
+| Submit score (clear/death/attempts) | m=96 `post_play_result`, m=22 `touch_object` | ✅ |
+| "More info" panel (who played/cleared/liked) | m=53, m=54, m=55 | ✅ |
+| Download course blob | m=25 `prepare_get_object` + HTTP | ✅ |
+| World record display | m=70 (CourseTimeStats substruct) | 🟡 — placeholder values, no replay parser yet |
+| Clear rate / play stats | m=70 (CourseInfo.play_stats), m=96 (feeds them) | ✅ |
+| Thumbnails (1-screen, 3-screen) | m=132, m=133, m=134 | ✅ |
+| Course ID display post-upload | m=70 (CourseInfo.code) | ✅ |
+| Get NG course notification | m=129 | ✅ |
+
+### Maker Profile
+
+| Feature | NEX method(s) | Status |
+|---|---|---|
+| Overview (own profile, Mii, country, stats) | m=49 `sync_user_profile`, m=48 `get_users` | ✅ |
+| "My Courses" / Upload Courses tab | m=74 `search_courses_posted_by` | ✅ |
+| "Courses I Played" tab | m=76 `search_courses_played_by` | ✅ |
+| "Courses I Liked / Hearted" tab | m=75 `search_courses_positive_rated_by` | 🟡 — only rate-able on courses you've played |
+| "First to Clear" tab | m=80 `search_courses_first_clear` | ✅ |
+| "My Best Time" tab | m=81 `search_courses_best_time` | 🟡 — same data source as m=80 (no per-player best-time parser) |
+
+### Not in the user's mental list yet (but work)
+
+These were not on the initial feature list above but are wired and verified:
+
+- `m=94` `search_comments_in_order` (paginated) and `m=95` `search_comments` —
+  per-course comment lists. Seeded with default comments at startup; no RMC
+  exists to post new ones yet.
+- `m=15` `rate_object` — like/heart/boo buttons on a course detail page.
+  Bumps `LikeCount` / `HeartCount` / `BoosCount` and feeds the
+  positive-rated-courses tab (m=75).
+- `m=103` `get_death_positions` — list is always empty (no replay parser);
+  the "View Deaths" button renders with no entries instead of erroring.
+- `m=154` `get_event_course_status` — returns a neutral status (no event
+  courses running).
+- World maps (m=160, m=162) — empty lists. We have no world map data.
+
 The binary expects `cert.pem` + `key.pem` in the working directory (or via
 `CERT_FILE` / `KEY_FILE` env vars). It also needs a reachable `nextendo-account`
 service (default `NEXTENDO_ACCOUNT_URL=http://nextendo-account:8080`).
