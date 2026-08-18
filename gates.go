@@ -1,17 +1,18 @@
 package main
 
-// Online GATES enforced at NEX login — the SAME rules as the old the previous stack infra:
-//   - Compte Nextendo OBLIGATOIRE (requireAccount): aucune identité de compte -> refus.
-//   - Online = comptes Nextendo UNIQUEMENT: un NSA de vraie console non lié / un serveur
-//     compte injoignable -> refus (fail-CLOSED : un profil non-Nextendo n'entre jamais).
-//   - #6 e-mail vérifié OBLIGATOIRE.
-//   - #5 un seul endroit à la fois (présence RÉELLE via le monitoring).
-//   - compte désactivé -> refus.
+// Online GATES enforced at NEX login — the same rules as the Nextendo account server:
+//   - Nextendo account REQUIRED (requireAccount): no account identity -> reject.
+//   - Online = Nextendo accounts ONLY: a real Switch's NSA id not linked, or the
+//     account server unreachable -> reject (fail-CLOSED: a non-Nextendo profile
+//     never gets in).
+//   - #6 e-mail verified REQUIRED.
+//   - #5 single active device at a time (real presence via monitoring).
+//   - account disabled -> reject.
 //
-// The account server (nextendo-account) owns the gate logic; the auth server calls
-// /internal/online-check + /api/nsa and rejects the LoginEx on a block. FAIL-OPEN on an
-// online-check network error (a transient hiccup must never lock everyone out of online);
-// FAIL-CLOSED on an unverifiable NSA identity.
+// The account server (nextendo-account) owns the gate logic; this auth server calls
+// /internal/online-check + /api/nsa and rejects the LoginEx on a block. FAIL-OPEN on
+// an online-check network error (a transient hiccup must never lock everyone out of
+// online); FAIL-CLOSED on an unverifiable NSA identity.
 
 import (
 	"bytes"

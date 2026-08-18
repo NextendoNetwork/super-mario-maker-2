@@ -1,14 +1,22 @@
 package main
 
-// SMM2 DataStore — passage du REPLAY (rejoue la session capturée = fuite des données du
-// joueur capturé + faux niveaux Nintendo injouables) au DYNAMIQUE : les méthodes de CONTENU
-// (listes de niveaux / d'utilisateurs / commentaires / world map) renvoient des listes VIDES
-// (serveur vierge), et les méthodes STRUCTURELLES du boot gardent le replay (SMM2 en a besoin
-// pour entrer dans Course World, et elles ne fuitent ni niveau ni ami).
+// SMM2 DataStore (NEX protocol 0x73) — handler dispatcher.
 //
-// Forme des retours (datastore_smm2.proto) : list<T> => U32(0) ; bool => true. On construit
-// donc l'enveloppe vide exacte de chaque méthode. Résultat : Course World s'affiche mais VIDE,
-// le pseudo reste celui du compte local, aucune donnée capturée n'est servie aux autres.
+// Originally replayed byte-exact captured response bodies for the methods SMM2
+// needs at boot. That worked but leaked the captured player's identity (name, Mii,
+// maker code, 261 fake friends in get_users(48)). Now the dispatcher is dynamic:
+//
+//   - Content methods (lists of courses / users / comments / world maps) read from
+//     the in-memory store (smm2_courses / smm2_users / smm2_comments) and return
+//     real data filtered by conn.PID / request scope.
+//   - Methods with no data to return use smm2EmptyBuilders (a per-method-id builder
+//     of the empty-but-valid envelope: U32(0) for lists, bool(true) for trailing
+//     result flags). The client accepts empty lists — no error, no abort.
+//   - Methods that need a specific shape we don't have data for return NotFound
+//     (0x80690004) only when we know the client doesn't call them.
+//
+// For the per-method status (working / partial / stub / missing), see STATE.md.
+// For the wire format of each method, see kinnay/NintendoClients (datastore_smm2.py).
 
 import (
 	"fmt"

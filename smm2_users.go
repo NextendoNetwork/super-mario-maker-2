@@ -190,6 +190,9 @@ type profileRegistry struct {
 	path  string
 }
 
+// profiles is the in-memory + on-disk registry of maker profiles indexed by PID.
+// Auto-populated by RegisterUser(47); consumed by get_users(48) and the search
+// methods on courses (53/54/55/75/76/80/81). Persists to <storageDir>/profiles.json.
 var profiles = &profileRegistry{byPID: map[uint64]*registeredProfile{}}
 
 // init loads any previously-registered profiles from disk at startup, no main.go

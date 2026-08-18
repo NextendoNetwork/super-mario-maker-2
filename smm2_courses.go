@@ -1,7 +1,8 @@
 package main
 
 // CourseInfo wire layout (per NintendoClients/datastore_smm2.py:2158) — server-side
-// builder for get_courses(70) and search_courses_latest(73) responses.
+// builder for get_courses(70) and all search_courses_* methods that return CourseInfo
+// (72/73/74/75/76/80/81/84 + 58 with extra ranks).
 //
 // Field order is byte-for-byte with the Python class `.save()` method; deviating from
 // this order shifts where the client reads each field, which silently corrupts the
@@ -13,6 +14,8 @@ package main
 //   - RelationObjectReqGetInfo (line 2544): url string, data_type u8, size u32,
 //     unk buffer, filename string   (NOT the headers/root_ca shape from the kinnay
 //     wiki — kinnay was wrong here)
+//
+// For the per-method status, see STATE.md.
 
 import (
 	"crypto/md5"
