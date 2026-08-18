@@ -292,6 +292,59 @@ func buildCourseInfo(s *nex.Settings, m *courseMeta) []byte {
 	return frameStruct(s, 0, out.Bytes())
 }
 
+// writeCourseInfoListResponse emits the canonical `list<CourseInfo> + bool
+// result` envelope used by every search_courses_* method. nil / not-Ready
+// courses are silently skipped. result=true unless the caller passes a
+// custom `more` (e.g. for a paginated response).
+//
+// This is the course-side mirror of writeUserInfoListResponse in
+// smm2_datastore.go. All 9 search_courses_* handlers can compose this
+// instead of inlining the U32+for-loop+Bool pattern (Phase 2 of the
+// refactor will switch them over).
+func writeCourseInfoListResponse(s *nex.Settings, list []*courseMeta) []byte {
+	out := nex.NewStreamOut(s)
+	out.U32(uint32(len(list)))
+	for _, m := range list {
+		if m == nil || !m.Ready {
+			continue
+		}
+		out.Write(buildCourseInfo(s, m))
+	}
+	out.Bool(true)
+	return out.Bytes()
+}
+
+// writeCourseInfoListResponsePaginated applies offset/size to list and
+// emits the canonical envelope. The trailing bool is true when the
+// caller's pagination window reached the end (so the client knows
+// "no more pages" — the inverse of the hasMore flag some other
+// methods use).
+func writeCourseInfoListResponsePaginated(s *nex.Settings, list []*courseMeta, offset, size uint32) (body []byte, hasMore bool) {
+	if offset > uint32(len(list)) {
+		offset = uint32(len(list))
+	}
+	end := offset
+	if size > 0 {
+		end = offset + size
+	}
+	if end > uint32(len(list)) {
+		end = uint32(len(list))
+	}
+	page := list[offset:end]
+	hasMore = end < uint32(len(list))
+
+	out := nex.NewStreamOut(s)
+	out.U32(uint32(len(page)))
+	for _, m := range page {
+		if m == nil || !m.Ready {
+			continue
+		}
+		out.Write(buildCourseInfo(s, m))
+	}
+	out.Bool(true) // result=true; paginated methods in SMM2 use true=end-of-results
+	return out.Bytes(), hasMore
+}
+
 // buildCoursePlayStatsMap converts a courseMeta's play/clear/attempt counters into
 // a wire Map<u8, u32> using the OFFICIAL documented PlayStatsKeys (per kinnay's wiki,
 // "Course Play Stats" table): 0=Plays, 1=Attempts, 2=Unknown, 3=Clears, 4=Plays
