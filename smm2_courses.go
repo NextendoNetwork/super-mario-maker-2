@@ -205,6 +205,18 @@ func relationBytesOnDisk(dataID uint64, relType uint32, maxSize int) []byte {
 	return b
 }
 
+// idsToCourses maps a list of course data_ids to their *courseMeta via
+// courses.get. Used by every search_courses_* handler that takes
+// profile-owned IDs (75, 76, 80, 81) to convert before calling
+// writeCourseInfoListResponse.
+func idsToCourses(ids []uint64) []*courseMeta {
+	out := make([]*courseMeta, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, courses.get(id))
+	}
+	return out
+}
+
 // buildCourseInfo serialises a courseMeta to a framed CourseInfo per the
 // NintendoClients spec. The frameStruct wrapper matches what every other
 // complex return type in this server uses (so 70/73 receive [u32 frame][body]).
@@ -318,31 +330,13 @@ func writeCourseInfoListResponse(s *nex.Settings, list []*courseMeta) []byte {
 // emits the canonical envelope. The trailing bool is true when the
 // caller's pagination window reached the end (so the client knows
 // "no more pages" — the inverse of the hasMore flag some other
-// methods use).
+// methods use). Most callers should paginate first via paginate()
+// then call writeCourseInfoListResponse; this variant is kept for
+// the cases that want hasMore in one call.
 func writeCourseInfoListResponsePaginated(s *nex.Settings, list []*courseMeta, offset, size uint32) (body []byte, hasMore bool) {
-	if offset > uint32(len(list)) {
-		offset = uint32(len(list))
-	}
-	end := offset
-	if size > 0 {
-		end = offset + size
-	}
-	if end > uint32(len(list)) {
-		end = uint32(len(list))
-	}
-	page := list[offset:end]
-	hasMore = end < uint32(len(list))
-
-	out := nex.NewStreamOut(s)
-	out.U32(uint32(len(page)))
-	for _, m := range page {
-		if m == nil || !m.Ready {
-			continue
-		}
-		out.Write(buildCourseInfo(s, m))
-	}
-	out.Bool(true) // result=true; paginated methods in SMM2 use true=end-of-results
-	return out.Bytes(), hasMore
+	page := paginate(list, offset, size)
+	hasMore = offset+size < uint32(len(list)) || (size == 0 && offset < uint32(len(list)))
+	return writeCourseInfoListResponse(s, page), hasMore
 }
 
 // buildCoursePlayStatsMap converts a courseMeta's play/clear/attempt counters into
@@ -440,20 +434,17 @@ func smm2SearchCoursesLatest(conn *nex.Connection, req *nex.RMCMessage) *nex.RMC
 	// window (offset/size) we don't need yet at this catalog size — return newest 100.
 	list := courses.listAllReady(100)
 
-	out := nex.NewStreamOut(s)
-	out.U32(uint32(len(list))) // list<CourseInfo>
+	// DEBUG: fingerprint each CourseInfo so we can directly compare against the
+	// SAME data_id's bytes when it also appears in search_courses_posted_by(74) —
+	// same source code, never actually byte-diffed against each other before.
 	for _, m := range list {
 		ci := buildCourseInfo(s, m)
-		out.Write(ci)
-		// DEBUG: fingerprint each CourseInfo so we can directly compare against the
-		// SAME data_id's bytes when it also appears in search_courses_posted_by(74) —
-		// same source code, never actually byte-diffed against each other before.
 		fmt.Printf("[SMM2 Courses]   73 data_id=%d hash=%s len=%d\n", m.DataID, courseInfoHash(ci), len(ci))
 	}
-	out.Bool(true) // result
+	body := writeCourseInfoListResponse(s, list)
 
 	fmt.Printf("[SMM2 Courses] search_courses_latest(73) pid=%d -> %d course(s)\n", conn.PID, len(list))
-	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, body)
 }
 
 // smm2SearchCoursesHot handles search_courses_hot(84) — the "Hot/Popular Courses"
@@ -486,14 +477,7 @@ func smm2SearchCoursesHot(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMes
 	_ = in.Substream() // unknown shape, just consume
 
 	list := courses.listAllReadyByHotness(100)
-
-	out := nex.NewStreamOut(s)
-	out.U32(uint32(len(list))) // list<CourseInfo>
-	for _, m := range list {
-		ci := buildCourseInfo(s, m)
-		out.Write(ci)
-	}
-	out.Bool(true) // result
+	body := writeCourseInfoListResponse(s, list)
 
 	fmt.Printf("[SMM2 Courses] search_courses_hot(84) pid=%d -> %d course(s) sorted by hotness\n", conn.PID, len(list))
 	for _, m := range list {
@@ -503,7 +487,7 @@ func smm2SearchCoursesHot(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMes
 		fmt.Printf("[SMM2 Courses]   data_id=%d thumb1=%s (size=%d) thumb2=%s (size=%d)\n",
 			m.DataID, thumb1, sz1, thumb2, sz2)
 	}
-	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, body)
 }
 
 // thumbURLsForCourse returns the one_screen_thumbnail and entire_thumbnail URLs
@@ -699,41 +683,26 @@ func smm2SearchCoursesPostedBy(conn *nex.Connection, req *nex.RMCMessage) *nex.R
 
 	list := courses.listByOwnerReady(ownerPID)
 	// Apply pagination window.
-	if offset > uint32(len(list)) {
-		offset = uint32(len(list))
-	}
-	end := offset
-	if size > 0 {
-		end = offset + size
-	}
-	if end > uint32(len(list)) {
-		end = uint32(len(list))
-	}
-	page := list[offset:end]
+	page := paginate(list, offset, size)
 
-	out := nex.NewStreamOut(s)
-	out.U32(uint32(len(page)))
+	// DEBUG: same fingerprint as 73's, for direct cross-comparison of the SAME
+	// data_id's bytes between the two paths within the same test session.
 	for _, m := range page {
+		if m == nil || !m.Ready {
+			continue
+		}
 		ci := buildCourseInfo(s, m)
-		out.Write(ci)
-		// DEBUG: same fingerprint as 73's, for direct cross-comparison of the SAME
-		// data_id's bytes between the two paths within the same test session.
 		fmt.Printf("[SMM2 Courses]   74 data_id=%d hash=%s len=%d\n", m.DataID, courseInfoHash(ci), len(ci))
 	}
-	// PROBADO Y DESCARTADO (4 variantes de contenido para 74, todas fallan igual):
-	// ack totalmente vacío, U32(0) solo, U32(0)+Bool(true), U32(0)+Bool(false).
-	// Repuesto Bool(true), la forma correcta según la doc oficial — ver memoria del
-	// proyecto para el cierre completo de esta investigación.
-	out.Bool(true)
 
-	respBytes := out.Bytes()
+	body := writeCourseInfoListResponse(s, page)
 	// DEBUG: full raw hex of the outgoing response body (pre-RMC-envelope), so it can
 	// be pasted back for a byte-level review without needing another packet capture.
-	fmt.Printf("[SMM2 Courses]   74 RAW RESPONSE HEX (%d bytes): %s\n", len(respBytes), hex.EncodeToString(respBytes))
+	fmt.Printf("[SMM2 Courses]   74 RAW RESPONSE HEX (%d bytes): %s\n", len(body), hex.EncodeToString(body))
 
 	fmt.Printf("[SMM2 Courses] search_courses_posted_by(74) pid=%d owner=%d offset=%d size=%d -> %d/%d course(s)\n",
 		conn.PID, ownerPID, offset, size, len(page), len(list))
-	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, respBytes)
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, body)
 }
 
 // parseSearchCoursesPostedByParam decodes the SearchCoursesPostedByParam body.
@@ -827,19 +796,11 @@ func smm2SearchCoursesPositiveRatedBy(conn *nex.Connection, req *nex.RMCMessage)
 	if count > 0 && uint32(len(ids)) > count {
 		ids = ids[:count]
 	}
-	out := nex.NewStreamOut(s)
-	out.U32(uint32(len(ids)))
-	for _, id := range ids {
-		m := courses.get(id)
-		if m == nil || !m.Ready {
-			continue // deleted or pre-upload — skip silently
-		}
-		out.Write(buildCourseInfo(s, m))
-	}
-	out.Bool(true) // result=true ("more pages exist") per the documented shape
+	cs := idsToCourses(ids)
+	body := writeCourseInfoListResponse(s, cs)
 	fmt.Printf("[SMM2 Courses] search_courses_positive_rated_by(75) pid=%d target=%d count=%d -> %d courses\n",
-		conn.PID, pid, count, len(ids))
-	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
+		conn.PID, pid, count, len(cs))
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, body)
 }
 
 // smm2SearchCoursesPlayedBy (76) — "courses I played" (any play, not
@@ -857,19 +818,11 @@ func smm2SearchCoursesPlayedBy(conn *nex.Connection, req *nex.RMCMessage) *nex.R
 	if count > 0 && uint32(len(ids)) > count {
 		ids = ids[:count]
 	}
-	out := nex.NewStreamOut(s)
-	out.U32(uint32(len(ids)))
-	for _, id := range ids {
-		m := courses.get(id)
-		if m == nil || !m.Ready {
-			continue
-		}
-		out.Write(buildCourseInfo(s, m))
-	}
-	out.Bool(true)
+	cs := idsToCourses(ids)
+	body := writeCourseInfoListResponse(s, cs)
 	fmt.Printf("[SMM2 Courses] search_courses_played_by(76) pid=%d target=%d count=%d -> %d courses\n",
-		conn.PID, pid, count, len(ids))
-	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
+		conn.PID, pid, count, len(cs))
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, body)
 }
 
 // smm2SearchCoursesFirstClear (80) — "courses I was the FIRST to clear".
@@ -885,30 +838,12 @@ func smm2SearchCoursesFirstClear(conn *nex.Connection, req *nex.RMCMessage) *nex
 		pid = conn.PID
 	}
 	ids := profiles.coursesFirstCleared(pid)
-	if offset > uint32(len(ids)) {
-		offset = uint32(len(ids))
-	}
-	end := offset
-	if size > 0 {
-		end = offset + size
-	}
-	if end > uint32(len(ids)) {
-		end = uint32(len(ids))
-	}
-	page := ids[offset:end]
-	out := nex.NewStreamOut(s)
-	out.U32(uint32(len(page)))
-	for _, id := range page {
-		m := courses.get(id)
-		if m == nil || !m.Ready {
-			continue
-		}
-		out.Write(buildCourseInfo(s, m))
-	}
-	out.Bool(true)
+	page := paginate(ids, offset, size)
+	cs := idsToCourses(page)
+	body := writeCourseInfoListResponse(s, cs)
 	fmt.Printf("[SMM2 Courses] search_courses_first_clear(80) pid=%d target=%d offset=%d size=%d -> %d courses\n",
-		conn.PID, pid, offset, size, len(page))
-	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
+		conn.PID, pid, offset, size, len(cs))
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, body)
 }
 
 // smm2SearchCoursesBestTime (81) — "courses with my best time on the
@@ -925,30 +860,12 @@ func smm2SearchCoursesBestTime(conn *nex.Connection, req *nex.RMCMessage) *nex.R
 		pid = conn.PID
 	}
 	ids := profiles.coursesFirstCleared(pid)
-	if offset > uint32(len(ids)) {
-		offset = uint32(len(ids))
-	}
-	end := offset
-	if size > 0 {
-		end = offset + size
-	}
-	if end > uint32(len(ids)) {
-		end = uint32(len(ids))
-	}
-	page := ids[offset:end]
-	out := nex.NewStreamOut(s)
-	out.U32(uint32(len(page)))
-	for _, id := range page {
-		m := courses.get(id)
-		if m == nil || !m.Ready {
-			continue
-		}
-		out.Write(buildCourseInfo(s, m))
-	}
-	out.Bool(true)
+	page := paginate(ids, offset, size)
+	cs := idsToCourses(page)
+	body := writeCourseInfoListResponse(s, cs)
 	fmt.Printf("[SMM2 Courses] search_courses_best_time(81) pid=%d target=%d offset=%d size=%d -> %d courses\n",
-		conn.PID, pid, offset, size, len(page))
-	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
+		conn.PID, pid, offset, size, len(cs))
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, body)
 }
 
 // smm2RateObject handles rate_object(15) — the like/heart/boo path. Per

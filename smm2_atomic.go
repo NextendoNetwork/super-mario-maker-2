@@ -115,6 +115,23 @@ func readResultRange(sub *nex.StreamIn) (offset, size uint32) {
 	return
 }
 
+// paginate slices list[offset:offset+size], clamping to the list's
+// bounds. size=0 means "return everything from offset to the end".
+// Used by every search_courses_* method that has a ResultRange param.
+func paginate[T any](list []T, offset, size uint32) []T {
+	if offset > uint32(len(list)) {
+		offset = uint32(len(list))
+	}
+	end := offset
+	if size > 0 {
+		end = offset + size
+	}
+	if end > uint32(len(list)) {
+		end = uint32(len(list))
+	}
+	return list[offset:end]
+}
+
 // ============================================================================
 // Single-field atomic writers — the building blocks.
 // ============================================================================
