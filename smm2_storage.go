@@ -142,6 +142,36 @@ func (c *courseStore) load() {
 	fmt.Printf("[SMM2 Storage] catalogue chargé: %d cours, nextID=%d, dir=%s, url=%s\n",
 		len(c.byID), c.nextID, storageDir, storageURL)
 	c.migrateFlatLayout()
+	c.migrateFakeWorldRecords()
+}
+
+// migrateFakeWorldRecords clears out world-record entries stamped by the OLD
+// setCourseTimes (before 18/8), which always wrote WorldRecordFrames=1 as a
+// placeholder regardless of the actual clear time. Now that playtimeMs is real
+// (confirmed via an on-screen screenshot, see smm2PostPlayResult), a real time
+// (typically hundreds or thousands of ms) could never beat that fake "1" under
+// the new "lower wins" comparison in setCourseTimes — so any course stuck with
+// the old placeholder would keep a wrong, unbeatable "record" forever. Detects
+// the placeholder specifically (WorldRecordFrames == 1, a value no real
+// clear time will ever legitimately land on) and resets all three time-stats
+// fields so the next real clear populates them fresh. Runs once per startup;
+// harmless (and does nothing) once every affected course has been migrated.
+func (c *courseStore) migrateFakeWorldRecords() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	reset := 0
+	for _, m := range c.byID {
+		if m.WorldRecordFrames == 1 {
+			m.FirstCompletionPID = 0
+			m.WorldRecordHolderPID = 0
+			m.WorldRecordFrames = 0
+			reset++
+		}
+	}
+	if reset > 0 {
+		c.persistLocked()
+		fmt.Printf("[SMM2 Storage] migration: %d cours avec un faux \"record\" (placeholder=1) réinitialisé(s), prêts pour un vrai temps\n", reset)
+	}
 }
 
 // persist writes the catalog back to disk (called under lock).
@@ -450,25 +480,50 @@ func (c *courseStore) applyPlayed(dataID uint64, plays, clears, attempts, deaths
 	c.persistLocked()
 }
 
-// setCourseTimes records the placeholder world-record stats for a course
-// the first time a player clears it. Subsequent clears DO NOT update the
-// holder (we don't track per-player best times until a replay parser lands),
-// so the "first completion" stays anchored to the very first clearer. The
-// frames field is a placeholder of 1 — a real best time in 1/60s frames
-// requires decoding the clear-check replay (relation type 5) which is
-// unhandled today. Unknown dataIDs are silently ignored.
-func (c *courseStore) setCourseTimes(dataID, playerPID uint64, frames uint32) {
+// setCourseTimes records course completion times. FirstCompletionPID is set once,
+// on the very first clear ever, and frozen thereafter (matches the documented
+// semantic: "who cleared this course first" doesn't change). WorldRecordHolderPID/
+// WorldRecordFrames, though, ARE now updated properly: FIX (18/8) — before this,
+// they were set ONLY on the first-ever clear and never touched again ("we don't
+// track per-player best times until a replay parser lands"), so a later, faster
+// clear by someone else never became the new record. Now that playtimeMs is
+// CONFIRMED real (cross-checked against an on-screen clear-time screenshot, see
+// smm2PostPlayResult's doc comment), we can compare properly: lower is better,
+// and a genuinely faster run replaces the holder.
+//
+// NOTE ON THE FIELD NAME: WorldRecordFrames is a legacy name from when this was a
+// 60fps-frame placeholder (always 1). The value is now real MILLISECONDS from
+// smm2PostPlayResult's playtimeMs — kept the JSON field name as-is (renaming would
+// break existing catalog.json entries without a migration), but treat it as
+// milliseconds everywhere it's read.
+func (c *courseStore) setCourseTimes(dataID, playerPID uint64, timeMs uint32) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	m := c.byID[dataID]
 	if m == nil {
 		return
 	}
-	if m.FirstCompletionPID == 0 {
+	firstEver := m.FirstCompletionPID == 0
+	isFasterOrFirst := m.WorldRecordHolderPID == 0 || timeMs < m.WorldRecordFrames
+	if !firstEver && !isFasterOrFirst {
+		return // not the first clear, and not a new record — nothing to update
+	}
+	if firstEver {
 		m.FirstCompletionPID = playerPID
+	}
+	if isFasterOrFirst {
 		m.WorldRecordHolderPID = playerPID
-		m.WorldRecordFrames = frames
-		c.persistLocked()
+		m.WorldRecordFrames = timeMs
+	}
+	c.persistLocked()
+	if firstEver {
+		// Mirror on the player's profile so search_courses_first_clear(80)
+		// can answer "what courses was this PID the first to clear?". We
+		// release the catalog lock first to avoid a re-entrant lock on
+		// profiles.mu — profiles.recordFirstClear takes its own lock.
+		go func() {
+			profiles.recordFirstClear(playerPID, dataID)
+		}()
 	}
 }
 
@@ -509,6 +564,29 @@ func thumbPath(dataID uint64, relType uint32) string {
 
 // relationBaseName maps a PrepareRelationUpload "type" to its filename within a
 // course's directory. Returns "" for an unrecognized type.
+//
+// relType 6: seen in a real capture (dataID "13030", 146 bytes, URL field =
+// "Unknown"). Not documented in kinnay/NintendoClients. The 146-byte size +
+// repeated 0x01 patterns in the trailing body fields suggest a small metadata
+// blob (clear-time record, evaluation, or similar). Stored as "data6.bin"
+// until we have a confirmed name from a second capture that names it.
+//
+// relType 12: seen in a real capture (18/8) RIGHT AFTER a relType=6 upload for
+// the same data_id, same size (138 bytes both times) — same "finish a level"
+// post-play sequence. Not documented anywhere either. Before this was added,
+// the client got a NotFound error here and the whole post-play flow broke
+// ("communication error" right after finishing a level) — same failure shape
+// as the unhandled relType=6 case fixed earlier today. Stored as "data12.bin"
+// on the same "give it a slot, don't guess the meaning" basis as relType 6.
+//
+// DEFAULT (any other relType): rather than keep discovering these one at a time
+// — each missing case is a hard NotFound that breaks the whole post-play flow,
+// and we've already hit two undocumented ones (6, 12) in the SAME sequence,
+// suggesting there may be more further along that we just haven't seen yet —
+// accept ANY numeric relType and store it under a generic "data<N>.bin" name.
+// Worst case we store something we don't understand; best case (the likely
+// case) it silently absorbs the next unknown relType without another
+// "communication error" round-trip to diagnose.
 func relationBaseName(relType uint32) string {
 	switch relType {
 	case 1:
@@ -519,8 +597,12 @@ func relationBaseName(relType uint32) string {
 		return "thumb3.jpg"
 	case 5:
 		return "replay.bin"
+	case 6:
+		return "data6.bin"
+	case 12:
+		return "data12.bin"
 	default:
-		return ""
+		return fmt.Sprintf("data%d.bin", relType)
 	}
 }
 

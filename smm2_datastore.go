@@ -12,6 +12,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 
 	nex "github.com/NextendoNetwork/nextendo-nex"
 )
@@ -29,9 +30,9 @@ var smm2EmptyBuilders = map[uint32]func(*nex.StreamOut){
 	// NOTE: get_users(48) reste en REPLAY — SMM2 exige un UserInfo valide (son PROPRE profil) au
 	// boot, une liste vide casse l'init. Le nettoyer proprement = construire un UserInfo dynamique
 	// pour le PID connecté (structure lourde, prochaine étape) au lieu de rejouer la session capturée.
-	53: func(o *nex.StreamOut) { o.U32(0) },                      // search_users_played_course: users[]
-	54: func(o *nex.StreamOut) { o.U32(0) },                      // search_users_cleared_course
-	55: func(o *nex.StreamOut) { o.U32(0) },                      // search_users_positive_rated_course
+	53: func(o *nex.StreamOut) { o.U32(0) }, // search_users_played_course: users[]
+	54: func(o *nex.StreamOut) { o.U32(0) }, // search_users_cleared_course
+	55: func(o *nex.StreamOut) { o.U32(0) }, // search_users_positive_rated_course
 	// 70 (get_courses): wired to smm2GetCourses in the switch below (case 70).
 	// Kept out of smm2EmptyBuilders because the response needs conn.PID to filter
 	// the catalog — a stateless builder can't do that.
@@ -42,18 +43,21 @@ var smm2EmptyBuilders = map[uint32]func(*nex.StreamOut){
 	// switch below. The empty-list response was lying — even a player with uploads
 	// got an empty "courses posted by" page, both in their own maker profile and on
 	// other players' profile pages.
-	75: func(o *nex.StreamOut) { o.U32(0) },                      // search_courses_positive_rated_by
-	76: func(o *nex.StreamOut) { o.U32(0) },                      // search_courses_played_by
-	79: func(o *nex.StreamOut) { o.U32(0) },                      // search_courses_endless_mode
-	80: func(o *nex.StreamOut) { o.U32(0); o.Bool(true) },        // search_courses_first_clear
-	81: func(o *nex.StreamOut) { o.U32(0); o.Bool(true) },        // search_courses_best_time
-	82: func(o *nex.StreamOut) { o.U32(0); o.Bool(true) },        // search_courses_followee_posted_by: courses[], result — confirmed via measured_live.txt: fell to NotFound (method=0 in the S->C log) since it was missing from this map
-	85: func(o *nex.StreamOut) { o.U32(0); o.U32(0) },            // get_courses_event: courses[], results[]
-	86: func(o *nex.StreamOut) { o.U32(0) },                      // search_courses_event
-	94: func(o *nex.StreamOut) { o.U32(0); o.Bool(true) },        // search_comments_in_order: comments[], result
-	95: func(o *nex.StreamOut) { o.U32(0) },                      // search_comments
-	160: func(o *nex.StreamOut) { o.U32(0); o.U32(0) },           // get_world_map: maps[], results[]
-	162: func(o *nex.StreamOut) { o.U32(0) },                     // search_world_map_pick_up: maps[]
+	//
+	// 75/76/80/81 (positive_rated_by / played_by / first_clear / best_time)
+	// are wired to real handlers in the switch above (smm2SearchCourses*)
+	// — they need profiles.coursesPlayed/Rated/FirstCleared to be populated,
+	// which happens on m=15 (rate) and m=22/m=96 (touch / post_play).
+	79: func(o *nex.StreamOut) { o.U32(0) },               // search_courses_endless_mode
+	82: func(o *nex.StreamOut) { o.U32(0); o.Bool(true) }, // search_courses_followee_posted_by: courses[], result — confirmed via measured_live.txt: fell to NotFound (method=0 in the S->C log) since it was missing from this map
+	85: func(o *nex.StreamOut) { o.U32(0); o.U32(0) },     // get_courses_event: courses[], results[]
+	86: func(o *nex.StreamOut) { o.U32(0) },               // search_courses_event
+	// 94/95 (search_comments_in_order / search_comments): wired to real
+	// handlers in the case-switch above (smarter than the all-zero fallback —
+	// they need the comment store to be loaded at startup, which init() in
+	// smm2_comments.go does).
+	160: func(o *nex.StreamOut) { o.U32(0); o.U32(0) }, // get_world_map: maps[], results[]
+	162: func(o *nex.StreamOut) { o.U32(0) },           // search_world_map_pick_up: maps[]
 
 	// (103) get_death_positions: data_id:int -> list[DeathPositionInfo]. DOCUMENTED
 	// (nintendoclients.readthedocs.io) but never implemented — fell through to
@@ -64,7 +68,7 @@ var smm2EmptyBuilders = map[uint32]func(*nex.StreamOut){
 	// exactly what crashes rendering (matches the reported "spinner then instant
 	// fail, nothing shown" symptom). We have no death-position data to report, so
 	// an empty list is the correct honest answer regardless.
-	103: func(o *nex.StreamOut) { o.U32(0) },                     // get_death_positions: list<DeathPositionInfo>
+	103: func(o *nex.StreamOut) { o.U32(0) }, // get_death_positions: list<DeathPositionInfo>
 
 	// --- Leaderboard-facing methods, per kinnay/NintendoClients wiki (Data-Store-Protocol SMM2) —
 	//     none were implemented before, so Leaderboards fell through to NotFound. Same "empty
@@ -158,27 +162,52 @@ func smm2DataStoreHandler() nex.RMCHandler {
 			return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
 		}
 
-		// (63, 65, 129) — NOT documented by kinnay/NintendoClients (link-less in the method
-		// table, or not indexed at all). All three arrive with len=0 (no parameters) right in
-		// the middle of otherwise-working sessions in measured_live.txt, and every OTHER
-		// parameterless method in this protocol we've confirmed (59, 68, 69, 133) turned out to
-		// have "no return value" — acking them the same way is the best-founded guess available
-		// right now, not a shot in the dark. If the client still resets the Mii after this,
-		// these three are ruled out and the search moves elsewhere.
-		if req.Method == 63 || req.Method == 65 || req.Method == 129 {
-			fmt.Printf("[SMM2 DataStore] method %d pid=%d -> ack (sin params, patrón \"sin retorno\", no verificado)\n", req.Method, conn.PID)
+		// (63) GetMiiClothes: per kinnay/NintendoClients' OFFICIAL wiki (Data-Store-
+		// Protocol-SMM-2), this takes NO parameters but its response is documented as
+		// `List<MiiClothes>` — NOT "no return value" as this method was treated before
+		// (a truly empty body, 0 bytes). None of our 3 real reference captures show a
+		// response for this call either (only ever the request, never a matching
+		// INCOMING reply), so we don't have real bytes to copy — but the documented
+		// shape is clear enough to build correctly: an empty list is U32(0), 4 bytes,
+		// not a bare void ack. We have no Mii clothing data to report, so an empty
+		// list is the honest answer.
+		if req.Method == 63 {
+			out := nex.NewStreamOut(s)
+			out.U32(0) // list<MiiClothes>, empty
+			fmt.Printf("[SMM2 DataStore] GetMiiClothes(63) pid=%d -> empty list (documented shape, not a void ack)\n", conn.PID)
+			return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
+		}
+		// (65) GetUserNameNgType: per kinnay's official wiki, takes no parameters,
+		// response is `Uint8` ("Type") — also NOT "no return value" as treated before.
+		// 0 = not flagged/no NG type is the safe default (we don't run username
+		// moderation).
+		if req.Method == 65 {
+			out := nex.NewStreamOut(s)
+			out.U8(0) // Uint8 type: 0 = no NG flag
+			fmt.Printf("[SMM2 DataStore] GetUserNameNgType(65) pid=%d -> 0 (documented shape, not a void ack)\n", conn.PID)
+			return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
+		}
+		// (129) GetNgCourseNotification: listed in the OFFICIAL wiki's method table but
+		// WITHOUT a detailed section (no documented request/response shape, unlike 63/65
+		// above which DO have one now that we checked properly). No real capture shows a
+		// response either. Keeping this one as a void ack — every OTHER parameterless
+		// method we've confirmed with a real doc section (59, 68, 69, 133) genuinely IS
+		// void, so this remains the best-founded guess for the one method here that's
+		// still genuinely undocumented in detail.
+		if req.Method == 129 {
+			fmt.Printf("[SMM2 DataStore] method 129 pid=%d -> ack (sin parámetros, sigue sin documentación detallada)\n", conn.PID)
 			return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
 		}
 
-		// (61) PrepareGetRelationObject: the download-side counterpart of m=132. Client
-		// sends [u64 dataID, u32 relType] and expects a RelationObjectReqGetInfo back
-		// (kinnay/datastore_smm2.py:2544: {url, data_type, size, unk, filename}) pointing
-		// at /relation/<id>/<relType>. We were returning a void ack — the request shape
-		// was missing entirely, so the client couldn't learn where the relation object
-		// lives and disconnected ~8s later. Real shapes (kinnay spec, not reference) confirmed
-		// via the request bytes captured during a play attempt (callID=52, body=17).
+		// (61) CanPostRatingAndComment: per kinnay/NintendoClients' official wiki
+		// (Data-Store-Protocol-SMM-2) — NOT a relation-object fetch (an earlier guess,
+		// made before the official doc turned up, had it as "PrepareGetRelationObject").
+		// Confirmed by an exact byte-count match: request {Uint64, Uint32} and response
+		// {Uint64,Bool,Uint32,Map,Bool,Uint32,Map} at all-zero/false/empty land on
+		// exactly 12 and 26 bytes — matching the reference capture's byte counts field
+		// for field, not just in total length.
 		if req.Method == 61 {
-			return smm2PrepareGetRelationObject(conn, req)
+			return smm2CanPostRatingAndComment(conn, req)
 		}
 
 		// --- Level storage: real object upload/download on the Nextendo VPS.
@@ -226,6 +255,27 @@ func smm2DataStoreHandler() nex.RMCHandler {
 			// and a ResultRange pagination window; we treat the first pid as the
 			// owner (SMM2 sends one at a time in practice).
 			return smm2SearchCoursesPostedBy(conn, req)
+		case 75:
+			// search_courses_positive_rated_by: "courses I liked/hearted (not
+			// boo'd)" — the maker profile's "Liked Courses" tab. Reads from
+			// profiles.RatedCourses (fed by rate_object(15)).
+			return smm2SearchCoursesPositiveRatedBy(conn, req)
+		case 76:
+			// search_courses_played_by: "courses I played" — the maker
+			// profile's "Played Courses" tab. Reads from profiles.PlayedCourses
+			// (fed by touch_object(22) and post_play_result(96)).
+			return smm2SearchCoursesPlayedBy(conn, req)
+		case 80:
+			// search_courses_first_clear: "courses I was the first to clear".
+			// Reads from profiles.FirstCleared (fed by setCourseTimes on
+			// first replay upload + by m=96 with cleared=1).
+			return smm2SearchCoursesFirstClear(conn, req)
+		case 81:
+			// search_courses_best_time: "courses with my best time on the
+			// leaderboard". Currently same data source as 80 (no per-player
+			// best-time parser yet). Will tighten the filter once replay.bin
+			// is decoded.
+			return smm2SearchCoursesBestTime(conn, req)
 		case 84:
 			// search_courses_hot: "Hot/Popular Courses" tab in Course World.
 			// NOT documented in NintendoClients (same undocumented territory as 58/72/83
@@ -293,6 +343,41 @@ func smm2DataStoreHandler() nex.RMCHandler {
 			// return value. Future client sessions can then read the bumped count
 			// back via CourseInfo.play_stats.
 			return smm2TouchObject(conn, req)
+		case 96:
+			// (96) POST_PLAY_RESULT — NOT documented by kinnay/NintendoClients.
+			// Called by the client right after a play session ends (death or clear),
+			// BEFORE the m=70/m=48 re-fetches that close the loop. The reference
+			// (OCW) sends back a void ack (0 bytes, success=true). The body is a
+			// 51-byte substream that we read best-effort to extract:
+			//   - data_id of the course played
+			//   - a "cleared" flag (u8 at the end, value 1 = cleared, 0 = died)
+			//   - a death count (u32 in the middle)
+			// The remaining fields are undocumented SMM2-specific payloads; we
+			// don't try to interpret them, just bump the catalog's PlayCount
+			// (always) + ClearCount or DeathCount based on the cleared flag, and
+			// mirror the deltas to the player profile + the course's owner
+			// profile. Without this, the post-play stats the client shows in the
+			// detail screen stay frozen at 0.
+			return smm2PostPlayResult(conn, req)
+		case 104:
+			// (104) PLAY_EVENT — NOT documented by kinnay/NintendoClients.
+			// Called by the client twice in the post-play sequence (once before
+			// m=96 with type=0x0101, once after the m=70/m=48 re-fetch with
+			// type=0x0201). The body is a fixed 16-byte shape:
+			//   [u8=0][u32=11][u64=course_id][u8=0][u16=type]
+			// The reference (OCW) sends back a void ack. We just log the event
+			// and ack — no stats mutation, this is a "play started / play ended"
+			// log entry, not a stats update.
+			return smm2PlayEvent(conn, req)
+		case 94:
+			// (94) SEARCH_COMMENTS_IN_ORDER — paginated CommentInfo list.
+			// Wired to smm2SearchCommentsInOrder (smm2_comments.go), which
+			// handles the ResultRange pagination + the trailing "result" bool.
+			return smm2SearchCommentsInOrder(conn, req)
+		case 95:
+			// (95) SEARCH_COMMENTS — all-in-one CommentInfo list (no
+			// pagination, no trailing bool). Wired to smm2SearchComments.
+			return smm2SearchComments(conn, req)
 		}
 
 		if build, ok := smm2EmptyBuilders[req.Method]; ok {
@@ -351,22 +436,108 @@ func smm2Method125(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
 }
 
+// deathPositionInfoOut is one entry of get_death_positions(103)'s response.
+// Real structure per kinnay/NintendoClients (nintendoclients.readthedocs.io,
+// datastore_smm2.DeathPositionInfo): {data_id: int, x: int, y: int, is_subworld: bool}.
+type deathPositionInfoOut struct {
+	dataID     uint64
+	x          int32
+	y          int32
+	isSubworld bool
+}
+
+func (s *deathPositionInfoOut) Levels() []nex.Level {
+	return []nex.Level{{
+		Version: 0,
+		Save: func(out *nex.StreamOut) {
+			out.U64(s.dataID)
+			out.S32(s.x)
+			out.S32(s.y)
+			out.Bool(s.isSubworld)
+		},
+	}}
+}
+
+// parseDeathPositionsFromRelation reads the post-play relation blobs (relType 6/12,
+// see relationBaseName's doc) and extracts death positions from them.
+//
+// CONFIRMED REAL (18/8, comparing data6.bin/data12.bin across the 5 courses in this
+// catalog): the file starts with a magic header "SPRH" (not documented anywhere we've
+// found), followed by a run of FIXED 12-byte records, each starting with the same
+// 4-byte marker 80 3B 00 40, followed by ONE byte that varies 0-255 across records —
+// on the one course in our catalog with several attempts (1002, ALSO the longest
+// course in the catalog per the user), 18 such records appeared with values spread
+// across nearly the full 0-255 range (13 to 230), matching what a normalized
+// "how far through this specific course's length" position would look like on a
+// course using close to the maximum allowed width. Courses with no/few attempts have
+// NO such records (file is just the fixed ~130-byte header/footer with none of this
+// repeating block).
+//
+// NOT YET CONFIRMED: whether that single varying byte is genuinely "x" (position
+// along course length) with "y" living somewhere else in the same 12-byte record, or
+// whether y is simply not encoded here at all. We only have ONE varying byte
+// isolated so far — treating it as x (scaled into a small coordinate range) and
+// leaving y at a defensible middle-of-screen default until a capture with real
+// varying y data lets us isolate it the same way we isolated x. is_subworld is
+// always false — we have no confirmed signal for sub-area deaths yet.
+func parseDeathPositionsFromRelation(dataID uint64) []deathPositionInfoOut {
+	var blob []byte
+	for _, relType := range []uint32{6, 12} {
+		p := relationPath(dataID, relType)
+		if p == "" {
+			continue
+		}
+		if b, err := os.ReadFile(p); err == nil && len(b) > 0 {
+			blob = b
+			break
+		}
+	}
+	if len(blob) == 0 {
+		return nil
+	}
+	marker := []byte{0x80, 0x3b, 0x00, 0x40}
+	var out []deathPositionInfoOut
+	for i := 0; i+len(marker)+1 <= len(blob); i++ {
+		if blob[i] == marker[0] && blob[i+1] == marker[1] && blob[i+2] == marker[2] && blob[i+3] == marker[3] {
+			raw := blob[i+4] // the one confirmed-varying byte, 0-255
+			// Scale the normalized 0-255 value into a plausible SMM2 world-x range.
+			// SMM2 courses can run up to roughly 480 "blocks" wide in-game units —
+			// this scaling is a best-effort guess, NOT confirmed against a real
+			// client-rendered death marker yet.
+			x := int32(raw) * 480 / 255
+			out = append(out, deathPositionInfoOut{
+				dataID: dataID,
+				x:      x,
+				y:      120, // defensible mid-height default; no isolated y signal yet
+			})
+		}
+	}
+	return out
+}
+
 // smm2GetDeathPositions (103) — kinnay-indexed as "GET_DEATH_POSITIONS" (for
-// retrieving the death positions recorded for a course). In the reference play
-// flow the request is [u8 ver=0][u32 substream][u64 courseID] and the response
-// is u32(0) — i.e. "no deaths recorded for this course yet". A real response
-// would be a list of {x, y} world-coordinate death positions; for a private
-// server with no recorded deaths, u32(0) (empty list) is correct.
+// retrieving the death positions recorded for a course). Response is
+// list<DeathPositionInfo> — real fields confirmed via kinnay's official doc:
+// {data_id, x, y, is_subworld}, NOT a bare U32(0) placeholder as before.
+//
+// IMPLEMENTED (18/8): reads real positions via parseDeathPositionsFromRelation
+// (see its doc comment for the confirmed 12-byte-record format and what's
+// still uncertain about it). Courses with no recorded deaths correctly get an
+// empty list, same as before this change.
 func smm2GetDeathPositions(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
 	s := conn.Settings
+	// Request is a raw u64 data_id — NO [u8 ver][u32 substream] framing.
+	// Confirmed from wire: len=8, bytes = e803000000000000 = LE u64 1000.
 	in := nex.NewStreamIn(req.Body, s)
-	_ = in.U8()
-	sub := in.Substream()
-	courseID := sub.U64()
+	courseID := in.U64()
+	positions := parseDeathPositionsFromRelation(courseID)
 	out := nex.NewStreamOut(s)
-	out.U32(0) // empty list of death positions
-	fmt.Printf("[SMM2 DataStore] get_death_positions(103) pid=%d course_id=0x%x -> empty list\n",
-		conn.PID, courseID)
+	out.U32(uint32(len(positions)))
+	for _, p := range positions {
+		out.Add(&p)
+	}
+	fmt.Printf("[SMM2 DataStore] get_death_positions(103) pid=%d course_id=%d -> %d position(s)\n",
+		conn.PID, courseID, len(positions))
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
 }
 
@@ -390,8 +561,206 @@ func smm2TouchObject(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage 
 		sub := in.Substream()
 		dataID = sub.U64()
 	}
-	courses.applyPlayed(dataID, 1, 0, 0, 0) // +1 play
-	fmt.Printf("[SMM2 DataStore] touch_object(22) pid=%d data_id=%d -> play_count++ (ack)\n",
+	courses.applyPlayed(dataID, 1, 0, 0, 0) // course: +1 play
+	// Player stat: the person playing
+	profiles.applyPlayStats(conn.PID, 1, 0, 0, 0)
+	// Per-user relation: track that this PID has played this course, so
+	// search_courses_played_by(76) can answer correctly. Idempotent.
+	profiles.recordPlay(conn.PID, dataID)
+	// Maker stat: the owner of the course receives a play
+	if m := courses.get(dataID); m != nil {
+		profiles.applyMakerReceived(m.OwnerPID, 1, 0, 0, 0)
+	}
+	fmt.Printf("[SMM2 DataStore] touch_object(22) pid=%d data_id=%d -> play_count++ + player/maker stats + played_set\n",
 		conn.PID, dataID)
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
+}
+
+// smm2PostPlayResult (96) — UNDOCUMENTED in kinnay/NintendoClients. Called
+// by the client right after a play session ends, before the m=70/m=48
+// re-fetches that close the loop. The reference (OCW) response is a void
+// ack (0 bytes, success=true).
+//
+// Request body: EXACTLY 51 bytes in both reference captures (verified 18/8 by
+// reading the source capture files directly — the body[0]=version(1) +
+// body[1:5]=substream_len(46) + 46-byte substream, no trailing byte at all;
+// an earlier version of this comment claimed one capture was 52 bytes with a
+// trailing 0x00, that was wrong). Layout, verified field-by-field against both
+// real captures (both play sessions of OCW course 1000003046):
+//
+//	substream (46 bytes):
+//	  u64  course_id                (1000003046, same both times)
+//	  u32  attempt_count?           CONFIRMED VARIES (18/8, controlled test: same
+//	                                 course played twice, once cleared on the first
+//	                                 try (value=1), once with 2 deliberate deaths
+//	                                 added before clearing (value=3) — 2 deaths + 1
+//	                                 successful clear = 3 total tries, matches
+//	                                 exactly). Much stronger candidate for "attempt
+//	                                 count" than the field below ever was.
+//	  u32  playtime_ms              CONFIRMED (18/8, cross-checked against an
+//	                                 on-screen clear-time screenshot for a DIFFERENT
+//	                                 capture: field value 1450 matched the displayed
+//	                                 "00:01.450" exactly): MILLISECONDS, not 60fps
+//	                                 frames as an earlier version of this comment
+//	                                 claimed. Retroactively corrects the two
+//	                                 OCW captures too: 0x6BF6=27638ms=~27.6s and
+//	                                 0x71FF=29183ms=~29.2s (not 7m41s / 8m06s).
+//	  u16  unknown                  (1, both times)
+//	  u32  unknown, NOT death_count (13 in FIVE separate captures now, including a
+//	                                 CONTROLLED test — 18/8: the exact same course
+//	                                 played with 2 deliberately added deaths STILL
+//	                                 showed 13 here, identical to a same-course run
+//	                                 with no added deaths. Confirmed, not just
+//	                                 suspected: this field cannot be a death count.
+//	                                 Kept the "?" naming until we find what it
+//	                                 actually is.
+//	  u64  owner_pid? (=course_id)  (1000003046, both times)
+//	  u32  timestamp?               (0x00200A4C vs 0x0025012A — changes per play)
+//	  u32  unknown                  (256, both times)
+//	  u32  unknown                  (5, both times)
+//	  u32  cleared_flag             (1, both times — last u32 of the body)
+//
+// The two captures give us two data points: playtime + timestamp + the first
+// "unknown" u32 change per play, but course_id/owner_pid/the constant-13
+// field/the last three u32s stay constant — consistent with those being
+// per-course rather than per-play values (or, for the constant-13 field,
+// possibly not gameplay data at all — see its note above).
+//
+// A THIRD, LONGER variant (59 bytes, seen 18/8 from this project's own local
+// test courses 1002 and 1003, not OCW) adds two more fields after the same
+// 10-field prefix above: the course's numeric ID repeated twice as a STRING
+// (e.g. "1002"), with a small 5-byte gap between them (u32=5, u8=1). Real,
+// small local test courses without a proper Nintendo-style alphanumeric code
+// appear to fall back to the numeric ID as a string here — untested whether a
+// real 9-character code (like "PFGYVNN6K") would appear in that same slot for
+// an OCW-style course, since neither of the two 51-byte OCW captures we have
+// include this suffix at all.
+//
+// We only trust the fields the client itself will reuse downstream: the
+// course_id (first u64 of the substream) and the cleared_flag (the LAST u32
+// of the body — fixed position relative to body end, robust to the 1-byte
+// length difference between OCW captures). The cleared_flag decides whether
+// we bump ClearCount or DeathCount in the catalog — both go through the same
+// courses.applyPlayed() / profiles.applyPlayStats() / profiles.applyMakerReceived()
+// pipeline used by m=22 and m=133, so all three post-play paths stay consistent.
+//
+// Owner self-clear detection: we skip the maker-side bump when conn.PID ==
+// course.OwnerPID, matching the same self-play guard m=25 already enforces
+// (so a maker testing their own course doesn't inflate their own stats).
+func smm2PostPlayResult(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
+	s := conn.Settings
+	var dataID uint64
+	var attempts uint32 // per-session attempt count — see field doc above. Treated as a DELTA
+	// (added to the course/player's running AttemptCount via applyPlayed/applyPlayStats), same
+	// as plays/clears/deaths — NOT an absolute lifetime total. The confirmed value (1 on a
+	// first-try clear, 3 after 2 deaths) is "how many tries THIS session took", so adding it
+	// once per post_play_result call is the correct accumulation, not an overwrite.
+	var playtimeMs uint32 // CONFIRMED milliseconds (see field doc above) — 18/8, now wired to setCourseTimes
+	var cleared uint32    // 0 = died, 1 = cleared (per OCW, the last u32 of the body is the cleared flag)
+	if len(req.Body) >= 5 {
+		defer func() { recover() }() // tolerate any parse error
+		in := nex.NewStreamIn(req.Body, s)
+		_ = in.U8() // outer u8 prefix (some clients send a version byte outside the substream)
+		sub := in.Substream()
+		if sub != nil && sub.Remaining() >= 16 {
+			dataID = sub.U64()
+			attempts = sub.U32()   // the field confirmed via the controlled 2-death test (see doc above)
+			playtimeMs = sub.U32() // confirmed via an on-screen "00:01.450" screenshot match
+		} else if sub != nil && sub.Remaining() >= 12 {
+			dataID = sub.U64()
+			attempts = sub.U32()
+		} else if sub != nil && sub.Remaining() >= 8 {
+			dataID = sub.U64()
+		}
+	}
+	// Cleared flag is the LAST u32 of the body. Two OCW reference captures
+	// (51 and 52 bytes) both have it = 1 (cleared), so the 1-byte length
+	// difference doesn't move the field — it lives at body[len-4:len-0].
+	if len(req.Body) >= 4 {
+		cleared = uint32(req.Body[len(req.Body)-4]) |
+			uint32(req.Body[len(req.Body)-3])<<8 |
+			uint32(req.Body[len(req.Body)-2])<<16 |
+			uint32(req.Body[len(req.Body)-1])<<24
+	}
+	// Decide which counter to bump. Cleared → +1 play +1 clear. Died → +1
+	// play +1 death. Either way, +1 play always (mirrors m=22 / m=133).
+	plays, clears, deaths := uint32(1), uint32(0), uint32(0)
+	if cleared != 0 {
+		clears = 1
+	} else {
+		deaths = 1
+	}
+	if dataID != 0 {
+		courses.applyPlayed(dataID, plays, clears, attempts, deaths)
+		profiles.applyPlayStats(conn.PID, plays, clears, attempts, deaths)
+		// Per-user relation: track that this PID has played this course
+		// AND (if cleared) was the first clearer. Idempotent on both.
+		profiles.recordPlay(conn.PID, dataID)
+		if cleared != 0 {
+			profiles.recordFirstClear(conn.PID, dataID)
+			// World-record time: now that playtimeMs is confirmed real (not a
+			// placeholder), record it — setCourseTimes compares against the
+			// current holder and only updates if this run is faster (see its
+			// own doc for the "first ever clear" vs "actually faster" logic).
+			if playtimeMs > 0 {
+				courses.setCourseTimes(dataID, conn.PID, playtimeMs)
+			}
+		}
+		if m := courses.get(dataID); m != nil && m.OwnerPID != conn.PID {
+			profiles.applyMakerReceived(m.OwnerPID, plays, clears, attempts, deaths)
+		}
+	}
+	verb := "DIED"
+	if cleared != 0 {
+		verb = "CLEARED"
+	}
+	fmt.Printf("[SMM2 DataStore] post_play_result(96) pid=%d data_id=%d cleared=0x%x attempts=%d -> +%d play +%d clear +%d death +%d attempt (%s) + player%s\n",
+		conn.PID, dataID, cleared, attempts, plays, clears, deaths, attempts, verb,
+		func() string {
+			if dataID != 0 {
+				if m := courses.get(dataID); m != nil && m.OwnerPID == conn.PID {
+					return " (self-play, maker stats skipped)"
+				}
+			}
+			return " + maker"
+		}())
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
+}
+
+// smm2PlayEvent (104) — UNDOCUMENTED in kinnay/NintendoClients. Called by
+// the client twice in the post-play sequence:
+//
+//  1. Before m=96, with type=0x0101 — "play ended" log entry
+//  2. After the m=70/m=48 re-fetch, with type=0x0201 — "play fully done" log entry
+//
+// Request body (16 bytes, fixed shape):
+//
+//	[u8=0][u32=11][u64=course_id][u8=0][u16=type]
+//
+// We don't trust the u32=11 magic to be a length prefix (the SMM2 client
+// might emit different sub-types in a future patch that change the
+// trailing payload size). Instead, we read the 16 bytes positionally:
+// skip 5 bytes, u64 course_id, skip 1 byte, u16 type. The reference (OCW)
+// response is a void ack — we don't mutate stats, this is a logging
+// event, not a stats update. (Stats live in m=96 / m=22 / m=133.)
+func smm2PlayEvent(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
+	var dataID uint64
+	var evType uint16
+	if len(req.Body) >= 16 {
+		// [u8=0][u32=11][u64=course_id][u8=0][u16=type]
+		dataID = uint64(req.Body[5]) | uint64(req.Body[6])<<8 | uint64(req.Body[7])<<16 |
+			uint64(req.Body[8])<<24 | uint64(req.Body[9])<<32 | uint64(req.Body[10])<<40 |
+			uint64(req.Body[11])<<48 | uint64(req.Body[12])<<56
+		evType = uint16(req.Body[14]) | uint16(req.Body[15])<<8
+	}
+	typeName := "?"
+	switch evType {
+	case 0x0101:
+		typeName = "play_ended"
+	case 0x0201:
+		typeName = "play_done"
+	}
+	fmt.Printf("[SMM2 DataStore] play_event(104) pid=%d data_id=%d type=0x%04x (%s) -> ack\n",
+		conn.PID, dataID, evType, typeName)
+	return nex.NewRMCSuccess(conn.Settings, 0x73, req.Method, req.CallID, nil)
 }

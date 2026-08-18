@@ -403,6 +403,31 @@ func startDashboard(endpoint *nex.Endpoint, mm *nex.Matchmaking) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"reaped": endpoint.ReapIdle(nex.ReapIdleTimeout())})
 	})
+	// /api/reload — recarga catalog.json y profiles.json desde disco sin reiniciar
+	// el servidor. Útil para aplicar ediciones manuales al JSON (world_record_frames,
+	// first_completion_pid, etc.) sin desconectar a los jugadores en partida.
+	// Requiere autenticación igual que /api/kick.
+	mux.HandleFunc("/api/reload", func(w http.ResponseWriter, r *http.Request) {
+		if !authed(w, r) {
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		courses.mu.Lock()
+		courses.byID = map[uint64]*courseMeta{}
+		courses.mu.Unlock()
+		courses.load()
+		profiles.mu.Lock()
+		profiles.byPID = map[uint64]*registeredProfile{}
+		profiles.mu.Unlock()
+		profiles.load()
+		fmt.Printf("[SMM2 Dashboard] /api/reload -> catalog=%d courses, profiles=%d\n",
+			len(courses.byID), len(profiles.byPID))
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"courses":  len(courses.byID),
+			"profiles": len(profiles.byPID),
+		})
+	})
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { fmt.Fprintln(w, "ok") })
 
 	fmt.Printf("[SMM2 Dashboard] stats API on :%s (token=%v)\n", port, token != "")

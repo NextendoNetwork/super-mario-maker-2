@@ -153,6 +153,34 @@ type registeredProfile struct {
 	// doesn't drift the count. Also kept in sync with Maker.Uploaded.
 	UploadedCount int      `json:"uploaded_count"`
 	UploadedIDs   []uint64 `json:"uploaded_ids"`
+
+	// --- Per-user relation sets, source of truth for m=75/m=76/m=80/m=81.
+	// These were the missing piece behind an empty "courses I played" /
+	// "courses I positive-rated" / "courses I first-cleared" /
+	// "courses with my best time" tabs in the maker profile UI: the old code
+	// only tracked COUNTS (Play.Clears, Course.LikeCount, etc.) but the
+	// search-courses-by-X methods need the actual list of course_ids.
+	//
+	// PlayedCourses: set of data_ids this PID has touched at least once
+	// (touched via touch_object(22), prepare_get_object(25) on a non-owned
+	// course, or post_play_result(96)). Stored as a map[uint64]bool so
+	// duplicates collapse and JSON serialises the keys naturally.
+	//
+	// RatedCourses: per (data_id) → rating slot (0=like, 1=heart, 2=boo).
+	// A user can re-rate the same course, which overwrites the slot — the
+	// counters in the catalog keep every transition but the per-user set
+	// only stores the most recent (which is what search_courses_positive_rated_by
+	// needs: a course appears here if the LATEST rating is positive, i.e.
+	// slot 0 or 1). m=15 (rate_object) is the writer.
+	PlayedCourses map[uint64]bool `json:"played_courses,omitempty"`
+	RatedCourses map[uint64]uint8 `json:"rated_courses,omitempty"`
+
+	// --- Per-user first-clears: courses this PID was the FIRST to clear
+	// (set by setCourseTimes in storage.go on the first replay upload).
+	// Currently redundant with playedCourses + CourseTimeStats, but kept
+	// explicit for m=80 (search_courses_first_clear) and to make a future
+	// "earliest clears" leaderboard trivial.
+	FirstCleared map[uint64]bool `json:"first_cleared,omitempty"`
 }
 
 type profileRegistry struct {
@@ -242,6 +270,125 @@ func (p *profileRegistry) recordUpload(pid uint64, dataID uint64) bool {
 	r.Maker.Uploaded = uint32(len(r.UploadedIDs))
 	p.persistLocked()
 	return true
+}
+
+// recordPlay marks pid as having played dataID at least once. Called from
+// touch_object(22), prepare_get_object(25) (non-self only), and
+// post_play_result(96) — three paths cover the same notion of "the player
+// entered this course's play context" but each can fire independently
+// depending on which RMC the client happens to send (Ryujinx-Nextendo
+// currently only fires m=25; the full SMM2 client fires all three).
+// Idempotent: replaying the same course doesn't re-record. Persists the
+// profile so a server restart keeps the relation.
+func (p *profileRegistry) recordPlay(pid uint64, dataID uint64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	r := p.byPID[pid]
+	if r == nil {
+		return // ghost play — don't materialise a profile just for this
+	}
+	if r.PlayedCourses == nil {
+		r.PlayedCourses = map[uint64]bool{}
+	}
+	if r.PlayedCourses[dataID] {
+		return // already recorded
+	}
+	r.PlayedCourses[dataID] = true
+	p.persistLocked()
+}
+
+// recordRate marks pid as having rated dataID with the given slot
+// (0=like, 1=heart, 2=boo). A re-rate overwrites the slot — the catalog's
+// LikeCount/HeartCount/BoosCount keeps the cumulative history, but the
+// per-user set only stores the latest so that
+// search_courses_positive_rated_by(75) reflects the CURRENT state of the
+// user's vote (a user who re-rated from heart to boo should NOT appear in
+// the positive-rated list anymore).
+func (p *profileRegistry) recordRate(pid, dataID uint64, slot uint8) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	r := p.byPID[pid]
+	if r == nil {
+		return
+	}
+	if r.RatedCourses == nil {
+		r.RatedCourses = map[uint64]uint8{}
+	}
+	r.RatedCourses[dataID] = slot
+	p.persistLocked()
+}
+
+// recordFirstClear marks pid as the first clearer of dataID. Called from
+// setCourseTimes (storage.go) when the very first replay upload lands
+// for a course. Idempotent on repeat calls for the same course (the
+// upstream guard is in setCourseTimes itself, but we double-check here
+// so a stray second call doesn't double-write).
+func (p *profileRegistry) recordFirstClear(pid, dataID uint64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	r := p.byPID[pid]
+	if r == nil {
+		return
+	}
+	if r.FirstCleared == nil {
+		r.FirstCleared = map[uint64]bool{}
+	}
+	if r.FirstCleared[dataID] {
+		return
+	}
+	r.FirstCleared[dataID] = true
+	p.persistLocked()
+}
+
+// coursesPlayed returns the data_ids the PID has played, oldest-first
+// (insertion order). Returns nil if the PID is unknown.
+func (p *profileRegistry) coursesPlayed(pid uint64) []uint64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	r := p.byPID[pid]
+	if r == nil {
+		return nil
+	}
+	out := make([]uint64, 0, len(r.PlayedCourses))
+	for id := range r.PlayedCourses {
+		out = append(out, id)
+	}
+	return out
+}
+
+// coursesPositiveRated returns the data_ids the PID has rated POSITIVELY
+// (slot 0=like or 1=heart, NOT 2=boo). Powers m=75
+// (search_courses_positive_rated_by).
+func (p *profileRegistry) coursesPositiveRated(pid uint64) []uint64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	r := p.byPID[pid]
+	if r == nil {
+		return nil
+	}
+	out := make([]uint64, 0, len(r.RatedCourses))
+	for id, slot := range r.RatedCourses {
+		if slot == 0 || slot == 1 {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// coursesFirstCleared returns the data_ids the PID was the FIRST to clear.
+// Powers m=80 (search_courses_first_clear).
+func (p *profileRegistry) coursesFirstCleared(pid uint64) []uint64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	r := p.byPID[pid]
+	if r == nil {
+		return nil
+	}
+	out := make([]uint64, 0, len(r.FirstCleared))
+	for id := range r.FirstCleared {
+		out = append(out, id)
+	}
+	return out
 }
 
 // recordRating applies a rate_object(15) event to pid's maker stats.

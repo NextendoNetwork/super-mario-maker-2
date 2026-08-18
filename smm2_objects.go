@@ -38,6 +38,32 @@ func writeKeyValueList(out *nex.StreamOut, kv map[string]string) {
 	}
 }
 
+// fallbackNEXToken is the fixed Ryujinx-Nextendo dev token. Used when
+// conn.NEXToken is empty (Ryujinx doesn't send the NEX header).
+const fallbackNEXToken = "4If9rL9JRLMmEvD30GAxDl"
+
+// authTokenU returns the md5 hex of the client's real NEX token, falling back
+// to the Ryujinx-Nextendo dev token when the client didn't send one.
+func authTokenU(conn *nex.Connection) string {
+	token := conn.NEXToken
+	if token == "" {
+		token = fallbackNEXToken
+	}
+	return md5Hex(token)
+}
+
+// writeUHeaderKV writes the single-entry list<DataStoreKeyValue> for the
+// Authorization header ("u" = md5(NEXToken)) used by m=25 and m=134.
+func writeUHeaderKV(out *nex.StreamOut, u string) {
+	const kKey = "u"
+	elemBody := uint32(2 + len(kKey) + 1 + 2 + len(u) + 1)
+	out.U32(1)         // count=1
+	out.U8(0)          // element substream version
+	out.U32(elemBody)  // element substream length
+	out.String(kKey)
+	out.String(u)
+}
+
 // smm2CanPostCourse (60): per kinnay's wiki, request takes no parameters, response is
 // {Bool, Uint32} (both unlabeled/unknown). We have no reason to deny an upload, so
 // answer true + 0.
@@ -243,11 +269,17 @@ func smm2CompletePostRelationObject(conn *nex.Connection, req *nex.RMCMessage) *
 		relType = sub.U32()
 	}
 	if relType == 5 {
-		// Placeholder world-record update: 1 frame = "no real time yet". A
-		// future replay-parser would replace this with the actual clear time
-		// decoded from smm2_objects/courses/<id>/replay.bin.
+		// relType 5 = clear-check replay upload: the player just cleared this course.
+		// Bump ClearCount + record first-completion stats (placeholder frames=1).
+		courses.applyPlayed(dataID, 0, 1, 0, 0) // course: +1 clear
 		courses.setCourseTimes(dataID, conn.PID, 1)
-		fmt.Printf("[SMM2 Storage] CompletePostRelationObject(133) pid=%d data_id=%d relType=5 -> +1 first-clear stats (placeholder)\n",
+		// Player stat: the person clearing
+		profiles.applyPlayStats(conn.PID, 0, 1, 0, 0)
+		// Maker stat: the owner of the course receives a clear
+		if m := courses.get(dataID); m != nil {
+			profiles.applyMakerReceived(m.OwnerPID, 0, 1, 0, 0)
+		}
+		fmt.Printf("[SMM2 Storage] CompletePostRelationObject(133) pid=%d data_id=%d relType=5 -> +1 clear, first-clear stats, player/maker stats\n",
 			conn.PID, dataID)
 	} else {
 		fmt.Printf("[SMM2 Storage] CompletePostRelationObject(133) pid=%d data_id=%d relType=%d -> ack\n",
@@ -256,38 +288,42 @@ func smm2CompletePostRelationObject(conn *nex.Connection, req *nex.RMCMessage) *
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
 }
 
-// smm2PrepareGetRelationObject (61): called by the client right after
-// PrepareGetObject(25) for a course it's about to play. Request shape:
-//   [u8 ver=0][u32 substream=12][u64 dataID][u32 relType]
-// — matches the reference capture byte-for-byte (dataID 0x3B9BE979, relType=3,
-// for an in-game level being played). The reference response is a [u8 ver=0]
-// [u32 body=26] struct frame containing 26 bytes of zero. We don't know the
-// exact field layout inside those 26 bytes — the only verified constraint is
-// that the total is 31 bytes, byte-identical to reference, so the client's downstream
-// parsing lands in the same state. The 26-zero body is most likely an empty
-// "RelationObjectReqGetInfo-shaped" struct (no URL, no filename, all fields = 0):
-// the client reads it as "no relation object available" and moves on, instead
-// of stalling on a missing reference.
-//
-// EARLIER (kinnay guess): we returned a fully-populated RelationObjectReqGetInfo
-// pointing at our own /relation/<id>/<type> — that came straight from the kinnay
-// wiki and matched the upload-side m=132, but turned out to be wrong: the kinnay
-// spec is incomplete here. The reference capture shows the real shape.
-func smm2PrepareGetRelationObject(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
+// smm2CanPostRatingAndComment (61): per kinnay/NintendoClients' official wiki
+// (Data-Store-Protocol-SMM-2), this is CanPostRatingAndComment — NOT a relation-object
+// fetch. An earlier comment on this function guessed "PrepareGetRelationObject" from
+// the request shape alone (before the official doc turned up); that name never existed
+// in any real spec. Confirmed with an exact byte-count match against a real reference
+// capture: CanPostRatingAndCommentParam = {Uint64, Uint32} (8+4=12 bytes, matches our
+// observed request body exactly — the "relType=3" we used to call it is really just an
+// opaque param, not a relation type). CanPostRatingAndCommentResult = {Uint64, Bool,
+// Uint32, Map<Uint8,Uint32>, Bool, Uint32, Map<Uint8,Uint32>} — at all-zero/false/empty
+// defaults that's 8+1+4+4+1+4+4 = 26 bytes, matching the reference response's 26-byte
+// zero body EXACTLY, field count included. We can't post a rating/comment before actually
+// clearing the course, so "false, nothing yet" for every field is not just safe, it's
+// the honest answer — the client is completely fine with that and doesn't block on it
+// (confirmed by real play succeeding with exactly this response).
+func smm2CanPostRatingAndComment(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
 	s := conn.Settings
 	in := nex.NewStreamIn(req.Body, s)
 	_ = in.U8()           // struct version
 	sub := in.Substream() // u32 length + body
 	dataID := sub.U64()
-	relType := sub.U32()
+	param := sub.U32() // opaque param, previously (incorrectly) read as a "relType"
 
-	// 26 zero bytes inside a [u8 ver=0][u32 body=26] struct frame, matching the
-	// reference response exactly. Don't try to populate fields from kinnay's spec
-	// until we have a second capture to confirm the layout.
-	resp := frameStruct(s, 0, make([]byte, 26))
+	// CanPostRatingAndCommentResult, all fields at their zero value — matches the
+	// reference response byte-for-byte (verified: 26 bytes total, same as this).
+	body := nex.NewStreamOut(s)
+	body.U64(0)          // unknown
+	body.Bool(false)     // unknown (can_post_rating?)
+	body.U32(0)          // unknown
+	body.U32(0)          // Map<Uint8,Uint32> #1, empty (count=0)
+	body.Bool(false)     // unknown (can_post_comment?)
+	body.U32(0)          // unknown
+	body.U32(0)          // Map<Uint8,Uint32> #2, empty (count=0)
+	resp := frameStruct(s, 0, body.Bytes())
 
-	fmt.Printf("[SMM2 Storage] PrepareGetRelationObject(61) data_id=%d relType=%d -> 31 bytes (26 zero body, matches the reference)\n",
-		dataID, relType)
+	fmt.Printf("[SMM2 Storage] CanPostRatingAndComment(61) data_id=%d param=%d -> 31 bytes (all-zero result, matches the reference)\n",
+		dataID, param)
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, resp)
 }
 
@@ -382,21 +418,9 @@ func smm2PrepareGetObject(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMes
 		url := fmt.Sprintf("%s/object/%d", storageURL, dataID)
 		body := nex.NewStreamOut(s)
 		body.String(url) // url
-		// headers: must include the same `u=md5(NEXToken)` the client gets from
-		// m=134 — that's the auth token it attaches to the HTTP GET for /object/<id>.
-		// Without it the GET 401s (or 200s with the wrong body on Nintendo-style
-		// servers) and the course blob never reaches the client. Per-element
-		// substream framing is mandatory — the reference response has
-		// [u32 count=1][u8 ver=0][u32 body=39][String "u"][String hex32], the
-		// same shape m=134 emits. Mirror that exactly.
-		const kKey = "u"
-		uHex := md5Hex("4If9rL9JRLMmEvD30GAxDl") // hardcoded for now, see m=134
-		elemBody := uint32(2 + len(kKey) + 1 + 2 + len(uHex) + 1)
-		body.U32(1)        // count
-		body.U8(0)         // element substream version
-		body.U32(elemBody) // element substream length
-		body.String(kKey)
-		body.String(uHex)
+		// headers: u=md5(NEXToken), same token the client gets from m=134.
+		u := authTokenU(conn)
+		writeUHeaderKV(body, u)
 		body.U32(m.Size) // size
 		// root_ca_cert is a Buffer (u32 length prefix + bytes) per
 		// NintendoClients/datastore.py DataStoreReqGetInfo.load — matches
@@ -417,6 +441,17 @@ func smm2PrepareGetObject(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMes
 				}
 				return ""
 			}())
+		// Ryujinx-Nextendo proxy: touch_object(22) never arrives from the emulator,
+		// so we count a play here when the level blob is actually downloaded.
+		// Only count if the file exists on disk (real download, not a 404) and
+		// the player is NOT the owner (don't self-count test plays of own courses).
+		if diskSize > 0 && m.OwnerPID != conn.PID {
+			courses.applyPlayed(dataID, 1, 0, 0, 0)
+			profiles.applyPlayStats(conn.PID, 1, 0, 0, 0)
+			profiles.applyMakerReceived(m.OwnerPID, 1, 0, 0, 0)
+			fmt.Printf("[SMM2 Storage] prepare_get(25) data_id=%d -> +1 play (Ryujinx proxy, pid=%d != owner=%d)\n",
+				dataID, conn.PID, m.OwnerPID)
+		}
 		return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, resp)
 	}
 

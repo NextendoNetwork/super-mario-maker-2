@@ -289,33 +289,38 @@ func buildCourseInfo(s *nex.Settings, m *courseMeta) []byte {
 	return frameStruct(s, 0, out.Bytes())
 }
 
-// buildCoursePlayStatsMap converts a courseMeta's play/clear/attempt/death
-// counters into a wire Map<u8, u32> using the documented PlayStatsKeys
-// (PLAYS=0, CLEARS=1, ATTEMPTS=2, DEATHS=3). Returns nil when all four are 0
-// so the wire encoder writes a length-0 map.
+// buildCoursePlayStatsMap converts a courseMeta's play/clear/attempt counters into
+// a wire Map<u8, u32> using the OFFICIAL documented PlayStatsKeys (per kinnay's wiki,
+// "Course Play Stats" table): 0=Plays, 1=Attempts, 2=Unknown, 3=Clears, 4=Plays
+// (versus mode). FIX (18/8): the previous mapping had clears/attempts swapped (1=
+// Clears, 3=Deaths) — that table doesn't document a "Deaths" slot at all; deaths are
+// tracked separately via get_death_positions(103), not through this map. Returns nil
+// when everything we DO track is 0 so the wire encoder writes a length-0 map.
 func buildCoursePlayStatsMap(m *courseMeta) map[uint8]uint32 {
-	if m.PlayCount == 0 && m.ClearCount == 0 && m.AttemptCount == 0 && m.DeathCount == 0 {
+	if m.PlayCount == 0 && m.ClearCount == 0 && m.AttemptCount == 0 {
 		return nil
 	}
 	return map[uint8]uint32{
 		0: m.PlayCount,
-		1: m.ClearCount,
-		2: m.AttemptCount,
-		3: m.DeathCount,
+		1: m.AttemptCount,
+		3: m.ClearCount,
 	}
 }
 
-// buildCourseRatingsMap converts a courseMeta's like/heart/boos counters into a
-// wire Map<u8, u32> indexed by slot (0=like, 1=heart, 2=boo — same slot values
-// the rate_object(15) handler writes to). Returns nil when all three are 0.
+// buildCourseRatingsMap converts a courseMeta's rating counters into a wire
+// Map<u8, u32> using the OFFICIAL documented slot (per kinnay's wiki, "Course
+// Ratings" table): only slot 0="Hearts" is documented; slots 1/2 are "Unknown", NOT
+// "Like"/"Boo" as assumed before. FIX (18/8): SMM2 doesn't have a separate "like"
+// mechanic from hearts — hearts ARE the positive rating. HeartCount now maps to the
+// one documented slot; LikeCount/BoosCount have nowhere confirmed to go, so they're
+// left out of this map rather than guessed into undocumented slots. Returns nil when
+// HeartCount is 0.
 func buildCourseRatingsMap(m *courseMeta) map[uint8]uint32 {
-	if m.LikeCount == 0 && m.HeartCount == 0 && m.BoosCount == 0 {
+	if m.HeartCount == 0 {
 		return nil
 	}
 	return map[uint8]uint32{
-		0: m.LikeCount,
-		1: m.HeartCount,
-		2: m.BoosCount,
+		0: m.HeartCount,
 	}
 }
 
@@ -582,38 +587,22 @@ func smm2GetReqGetInfoHeadersInfo(conn *nex.Connection, req *nex.RMCMessage) *ne
 		reqType = req.Body[0]
 	}
 
-	// TEMP HARDCODED: Ryujinx-Nextendo currently doesn't send the "NEX" header in
-	// the WebSocket upgrade request (commit 9a1eced's diag log showed
-	// "Authorize stashed NEX=\"\" (len=0)"), so conn.NEXToken is empty and
-	// MD5(conn.NEXToken) is MD5("") = d41d8cd9... which crashes the emulator
-	// (client rejects any u != MD5(NEXToken)). Until Ryujinx-Nextendo is fixed
-	// to actually emit the header, we hardcode the token the mod uses
-	// (4If9rL9JRLMmEvD30GAxDl, MD5 = 69d38f81fb8d2b9979a64e47fbcc5524) — the
-	// client computes the same value and accepts. Remove this and uncomment the
-	// conn.NEXToken line once Ryujinx-Nextendo is fixed upstream.
-	u := md5Hex("4If9rL9JRLMmEvD30GAxDl")
-	// u := md5Hex(conn.NEXToken)
+	u := authTokenU(conn)
 
-	// Layout math: String is u16(length+null) + bytes + null, so for "u" (1 char) we
-	// emit 4 bytes total, and for the 32-char hex MD5 we emit 35 bytes total. The KV
-	// element body is therefore 4 + 35 = 39, the struct body wraps that with the
-	// 4-byte count, 5-byte element substream header and 4-byte expiration = 52.
+	// Layout math for the outer struct: String("u")=4 bytes, String(hex32)=35 bytes,
+	// elemBody=39. structBody wraps that with count(4) + substream header(5) + expiration(4) = 52.
 	const kKey = "u"
-	elemBody := uint32(2 + len(kKey) + 1 + 2 + len(u) + 1) // String(kKey) + String(u)
-	structBody := uint32(4 + 5 + elemBody + 4)              // count + element substream header + element body + expiration
+	elemBody := uint32(2 + len(kKey) + 1 + 2 + len(u) + 1)
+	structBody := uint32(4 + 5 + elemBody + 4)
 
 	out := nex.NewStreamOut(s)
-	out.U8(0)              // ReqGetInfoHeadersInfo struct version
-	out.U32(structBody)    // 52
-	out.U32(1)             // list<DataStoreKeyValue> count
-	out.U8(0)              // DataStoreKeyValue substream version
-	out.U32(elemBody)      // 39
-	out.String(kKey)       // "u"
-	out.String(u)          // MD5(NEXToken) hex
-	out.U32(60)            // expiration: 60s; we don't expire GET access
+	out.U8(0)           // ReqGetInfoHeadersInfo struct version
+	out.U32(structBody) // 52
+	writeUHeaderKV(out, u)
+	out.U32(60) // expiration: 60s
 
-	fmt.Printf("[SMM2 Courses] get_req_get_info_headers_info(134) pid=%d type=%d -> u=%s expiration=60s (body=%d bytes, structBody=%d, elemBody=%d)\n",
-		conn.PID, reqType, u, len(out.Bytes()), structBody, elemBody)
+	fmt.Printf("[SMM2 Courses] get_req_get_info_headers_info(134) pid=%d type=%d -> u=%s expiration=60s\n",
+		conn.PID, reqType, u)
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
 }
 
@@ -734,6 +723,187 @@ func parseSearchCoursesPostedByParam(s *nex.Settings, body []byte) (ownerPID uin
 	return
 }
 
+// parseSearchCoursesByPIDParam decodes the [u32 option][u32 count][u64 pid]
+// body shape used by SearchCoursesPositiveRatedBy(75) and
+// SearchCoursesPlayedBy(76) (kinnay/NintendoClients:1631, 1655). Returns
+// (pid, count). count is the client's hint for "give me up to N courses";
+// we honour it as the page size (0 → return everything).
+func parseSearchCoursesByPIDParam(s *nex.Settings, body []byte) (pid uint64, count uint32) {
+	defer func() { recover() }()
+	in := nex.NewStreamIn(body, s)
+	_ = in.U8() // param struct version
+	sub := in.Substream()
+	_ = sub.U32() // option (CourseOption bitmask; ignored for now)
+	count = sub.U32()
+	pid = sub.U64()
+	return
+}
+
+// parseSearchCoursesFirstClearParam decodes SearchCoursesFirstClearParam /
+// SearchCoursesBestTimeParam (kinnay/NintendoClients:1703, 1727) used by
+// m=80 / m=81: [u64 pid][u32 option][ResultRange]. Returns (pid, offset, size).
+// NOTE: pid comes FIRST here, unlike 75/76 where it's last — kinnay's
+// docs have the params in a different field order than I expected.
+func parseSearchCoursesFirstClearParam(s *nex.Settings, body []byte) (pid uint64, offset, size uint32) {
+	defer func() { recover() }()
+	in := nex.NewStreamIn(body, s)
+	_ = in.U8() // param struct version
+	sub := in.Substream()
+	pid = sub.U64()
+	_ = sub.U32() // option
+	_ = sub.U8()  // ResultRange: version
+	_ = sub.U32() // ResultRange: length
+	offset = sub.U32()
+	size = sub.U32()
+	return
+}
+
+// smm2SearchCoursesPositiveRatedBy (75) — "courses I positive-rated" (the
+// per-user Likes + Hearts, but NOT Boos). Powers the maker profile's
+// "Liked Courses" tab and a profile-page query when another player taps
+// your Mii. Was a stub in smm2EmptyBuilders returning an empty list —
+// the "Liked Courses" tab was always empty even after the user rated
+// courses. Now wired to profiles.coursesPositiveRated, which is fed by
+// rate_object(15) via profiles.recordRate (slot 0/1 → positive,
+// slot 2 → excluded; a re-rate from heart→boo correctly removes the
+// course from the set on the next rate call).
+func smm2SearchCoursesPositiveRatedBy(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
+	s := conn.Settings
+	pid, count := parseSearchCoursesByPIDParam(s, req.Body)
+	if pid == 0 {
+		pid = conn.PID
+	}
+	ids := profiles.coursesPositiveRated(pid)
+	// Apply client's count cap. count=0 means "no cap" (the spec says
+	// count is "max number of results"; a 0 value reads as "unlimited"
+	// in most kinnay code paths).
+	if count > 0 && uint32(len(ids)) > count {
+		ids = ids[:count]
+	}
+	out := nex.NewStreamOut(s)
+	out.U32(uint32(len(ids)))
+	for _, id := range ids {
+		m := courses.get(id)
+		if m == nil || !m.Ready {
+			continue // deleted or pre-upload — skip silently
+		}
+		out.Write(buildCourseInfo(s, m))
+	}
+	out.Bool(true) // result=true ("more pages exist") per the documented shape
+	fmt.Printf("[SMM2 Courses] search_courses_positive_rated_by(75) pid=%d target=%d count=%d -> %d courses\n",
+		conn.PID, pid, count, len(ids))
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
+}
+
+// smm2SearchCoursesPlayedBy (76) — "courses I played" (any play, not
+// just clear). Powers the maker profile's "Played Courses" tab. Was
+// a stub returning an empty list. Now wired to profiles.coursesPlayed,
+// which is fed by touch_object(22) and post_play_result(96) via
+// profiles.recordPlay (idempotent, so double-firing doesn't matter).
+func smm2SearchCoursesPlayedBy(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
+	s := conn.Settings
+	pid, count := parseSearchCoursesByPIDParam(s, req.Body)
+	if pid == 0 {
+		pid = conn.PID
+	}
+	ids := profiles.coursesPlayed(pid)
+	if count > 0 && uint32(len(ids)) > count {
+		ids = ids[:count]
+	}
+	out := nex.NewStreamOut(s)
+	out.U32(uint32(len(ids)))
+	for _, id := range ids {
+		m := courses.get(id)
+		if m == nil || !m.Ready {
+			continue
+		}
+		out.Write(buildCourseInfo(s, m))
+	}
+	out.Bool(true)
+	fmt.Printf("[SMM2 Courses] search_courses_played_by(76) pid=%d target=%d count=%d -> %d courses\n",
+		conn.PID, pid, count, len(ids))
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
+}
+
+// smm2SearchCoursesFirstClear (80) — "courses I was the FIRST to clear".
+// Powers a leaderboard / profile tab. Reads from profiles.FirstCleared,
+// populated by setCourseTimes (m=133 on relType=5) and by m=96 with
+// cleared=1. Until the real setCourseTimes / replay parser lands, the
+// "first clearer" is whoever posted the first replay (m=133) — which
+// matches the catalog's FirstCompletionPID, so the two stay consistent.
+func smm2SearchCoursesFirstClear(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
+	s := conn.Settings
+	pid, offset, size := parseSearchCoursesFirstClearParam(s, req.Body)
+	if pid == 0 {
+		pid = conn.PID
+	}
+	ids := profiles.coursesFirstCleared(pid)
+	if offset > uint32(len(ids)) {
+		offset = uint32(len(ids))
+	}
+	end := offset
+	if size > 0 {
+		end = offset + size
+	}
+	if end > uint32(len(ids)) {
+		end = uint32(len(ids))
+	}
+	page := ids[offset:end]
+	out := nex.NewStreamOut(s)
+	out.U32(uint32(len(page)))
+	for _, id := range page {
+		m := courses.get(id)
+		if m == nil || !m.Ready {
+			continue
+		}
+		out.Write(buildCourseInfo(s, m))
+	}
+	out.Bool(true)
+	fmt.Printf("[SMM2 Courses] search_courses_first_clear(80) pid=%d target=%d offset=%d size=%d -> %d courses\n",
+		conn.PID, pid, offset, size, len(page))
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
+}
+
+// smm2SearchCoursesBestTime (81) — "courses with my best time on the
+// leaderboard". Same shape as 80, but filtered on CourseTimeStats. We
+// don't track per-player best times yet (the replay parser that would
+// compute them is unhandled), so the result is whichever courses the
+// user has cleared — same source as 80 today. A future replay parser
+// will tighten this filter (only courses where this user's WR frames
+// beats the recorded world record).
+func smm2SearchCoursesBestTime(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
+	s := conn.Settings
+	pid, offset, size := parseSearchCoursesFirstClearParam(s, req.Body)
+	if pid == 0 {
+		pid = conn.PID
+	}
+	ids := profiles.coursesFirstCleared(pid)
+	if offset > uint32(len(ids)) {
+		offset = uint32(len(ids))
+	}
+	end := offset
+	if size > 0 {
+		end = offset + size
+	}
+	if end > uint32(len(ids)) {
+		end = uint32(len(ids))
+	}
+	page := ids[offset:end]
+	out := nex.NewStreamOut(s)
+	out.U32(uint32(len(page)))
+	for _, id := range page {
+		m := courses.get(id)
+		if m == nil || !m.Ready {
+			continue
+		}
+		out.Write(buildCourseInfo(s, m))
+	}
+	out.Bool(true)
+	fmt.Printf("[SMM2 Courses] search_courses_best_time(81) pid=%d target=%d offset=%d size=%d -> %d courses\n",
+		conn.PID, pid, offset, size, len(page))
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
+}
+
 // smm2RateObject handles rate_object(15) — the like/heart/boo path. Per
 // NintendoClients/datastore_smm2.py:
 //
@@ -777,6 +947,16 @@ func smm2RateObject(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
 	// course's own LikeCount — their profile isn't materialised just to hold
 	// a like, that would create ghost entries.
 	profiles.recordRating(ownerPID, slot, int64(ratingValue))
+	// Also remember THIS rater's vote on THIS course so search_courses_positive_rated_by(75)
+	// can answer "what courses has this PID rated?". The slot value (0/1/2)
+	// is stored on the profile; a re-rate overwrites it, so a heart→boo
+	// transition correctly removes the course from the positive-rated set.
+	// We also skip self-rates: a maker can't positive-rate their own course
+	// (Nintendo enforces this client-side, but we enforce it server-side too
+	// to keep the set honest if the client ever bypasses the check).
+	if ratingValue > 0 && conn.PID != ownerPID {
+		profiles.recordRate(conn.PID, dataID, slot)
+	}
 
 	// Aggregate we return to the client. The kinnay doc says
 	// (total_value, count, initial_value) — we approximate total_value as
