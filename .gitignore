@@ -12,3 +12,4 @@ captured_live.txt
 measured_live.txt
 _tmp_*.py        # one-off analysis scripts
 _tmp_*.go
+measured_live.txt
