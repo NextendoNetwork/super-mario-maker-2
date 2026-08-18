@@ -81,6 +81,79 @@ to the NEX method(s) that implement it.
   courses running).
 - World maps (m=160, m=162) — empty lists. We have no world map data.
 
+## Not implemented
+
+User-facing features that are not implemented. The client either sees an
+empty/blank state, an error, or the tab doesn't render at all. Stubbed
+methods return the empty-list envelope (U32(0) + bool(true)) so the
+client renders "no data" without erroring; methods not in the dispatcher
+fall through to `DataStore::NotFound` (0x80690004) which can abort the
+surrounding flow.
+
+### Network play (multiplayer)
+
+The whole NEX matchmaking stack (NEX SecureServer `0x6A` session methods)
+is not implemented — no session management, no matchmaking, no
+versus/co-op lobby. The per-profile `multiplayer_stats` schema exists
+(see `registeredProfile` in `smm2_users.go`) but no event handler
+populates it, so the "versus wins / coop wins" stats on a profile are
+always zero.
+
+### Leaderboards
+
+Ranking searches return empty (stub in `smm2EmptyBuilders`). The
+"Course Markers" / leaderboard tabs render with no entries:
+
+- m=50 `search_users_user_point` — user point ranking
+- m=51 `search_users_endless_mode` — endless-mode user ranking
+- m=52 `search_users_battle_mode` — battle-mode user ranking
+- m=56 `search_users_followee` — followed-players ranking
+- m=57 `search_users_clear_ranking` — clear-count ranking
+- m=71 `point_ranking` — courses + ranks + result (the "Course Markers" data)
+- m=147 `search_users_official` (undocumented) — stub
+- m=168 `search_users_followee_v2` (undocumented) — stub
+
+Note: `m=58` `search_courses_leaderboard` IS wired (returns the
+top-by-hotness courses), but without the surrounding ranking data the
+"Course Markers" tab looks empty.
+
+### ID search
+
+Looking up a course by its shareable 4-segment code
+(`ABCD-1234-EFGH-5678`). No `code → data_id` lookup method is
+implemented. The in-game search bar returns no results; this also breaks
+"join by ID" flows (where the client pastes a code and expects to be
+navigated to the course).
+
+### Endless challenge
+
+- m=79 `search_courses_endless_mode` — stub
+- m=85 `get_courses_event` — stub
+- m=86 `search_courses_event` — stub
+- The per-profile `EndlessHighScores` map (per-difficulty) exists in the
+  schema but no event handler populates it; the "Endless Challenge"
+  score on a profile is always zero.
+
+### Super worlds
+
+- m=160 `get_world_map` — stub, returns empty list
+- m=162 `search_world_map_pick_up` — stub, returns empty list
+- m=155, 156, 157 (undocumented, super-worlds-related per call sequence
+  in measured traces) — NotFound; not handled in the dispatcher. If the
+  client calls them the response is `DataStore::NotFound` which may abort
+  the surrounding flow.
+
+### Ninji speedruns
+
+- m=154 `get_event_course_status` returns a neutral status ("no event
+  course active"). The client sees "no ninji event running right now"
+  rather than an error.
+- No event-course upload / download flow on the server (no ninji data on
+  disk). The in-game "Ninji Speedrun" tab renders but no courses are
+  available.
+- No methods for posting a ninji replay or fetching the leaderboard
+  specific to the active event.
+
 The binary expects `cert.pem` + `key.pem` in the working directory (or via
 `CERT_FILE` / `KEY_FILE` env vars). It also needs a reachable `nextendo-account`
 service (default `NEXTENDO_ACCOUNT_URL=http://nextendo-account:8080`).
