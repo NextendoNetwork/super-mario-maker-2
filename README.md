@@ -31,8 +31,14 @@ go build -o smm2-server .
 ## What works
 
 End-to-end flows validated against a real SMM2 capture. Each feature is mapped
-to the NEX method(s) that implement it. ✅ = working as captured; 🟡 = working
-but with a known caveat (see note).
+to the NEX method(s) that implement it.
+
+| Status | Meaning |
+|---|---|
+| ✅ | Working as captured. |
+| 🟡 | Working but with a known caveat (see note). |
+| ❌ | Handler is wired but does **not** work in the client (verified by real testing). |
+| ⚪ | Not implemented / stub / no data to return. |
 
 ### Course World
 
@@ -44,7 +50,11 @@ but with a known caveat (see note).
 | Upload course (level + relations) | m=66, m=68, m=132, m=133 + HTTP | ✅ |
 | Play course (download + run) | m=25 (HTTP GET) + m=24/26 (telemetry) | ✅ |
 | Submit score (clear/death/attempts) | m=96 `post_play_result`, m=22 `touch_object` | ✅ |
-| "More info" panel (who played/cleared/liked) | m=53, m=54, m=55 | ✅ |
+| **Player list** — "people who played this course" | m=53 `search_users_played_course` | ✅ |
+| **Cleared-by list** — "people who first-cleared this course" | m=54 `search_users_cleared_course` | ✅ |
+| **Liked-by list** — "people who liked/hearted this course" | m=55 `search_users_positive_rated_course` | ✅ |
+| Rate like / heart / boo | m=15 `rate_object` | ❌ — wired, no anda en cliente |
+| Comments list (per course) | m=94 `search_comments_in_order`, m=95 `search_comments` | ❌ — wired, no anda en cliente |
 | Download course blob | m=25 `prepare_get_object` + HTTP | ✅ |
 | World record display | m=70 (CourseTimeStats substruct) | 🟡 — placeholder values, no replay parser yet |
 | Clear rate / play stats | m=70 (CourseInfo.play_stats), m=96 (feeds them) | ✅ |
@@ -59,20 +69,12 @@ but with a known caveat (see note).
 | Overview (own profile, Mii, country, stats) | m=49 `sync_user_profile`, m=48 `get_users` | ✅ |
 | "My Courses" / Upload Courses tab | m=74 `search_courses_posted_by` | ✅ |
 | "Courses I Played" tab | m=76 `search_courses_played_by` | ✅ |
-| "Courses I Liked / Hearted" tab | m=75 `search_courses_positive_rated_by` | 🟡 — only rate-able on courses you've played |
+| "Courses I Liked / Hearted" tab | m=75 `search_courses_positive_rated_by` | ❌ — no funciona |
 | "First to Clear" tab | m=80 `search_courses_first_clear` | ✅ |
 | "My Best Time" tab | m=81 `search_courses_best_time` | 🟡 — same data source as m=80 (no per-player best-time parser) |
 
-### Not in the user's mental list yet (but work)
+### Other wired methods
 
-These were not on the initial feature list above but are wired and verified:
-
-- `m=94` `search_comments_in_order` (paginated) and `m=95` `search_comments` —
-  per-course comment lists. Seeded with default comments at startup; no RMC
-  exists to post new ones yet.
-- `m=15` `rate_object` — like/heart/boo buttons on a course detail page.
-  Bumps `LikeCount` / `HeartCount` / `BoosCount` and feeds the
-  positive-rated-courses tab (m=75).
 - `m=103` `get_death_positions` — list is always empty (no replay parser);
   the "View Deaths" button renders with no entries instead of erroring.
 - `m=154` `get_event_course_status` — returns a neutral status (no event
