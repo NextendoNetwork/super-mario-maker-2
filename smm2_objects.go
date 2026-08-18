@@ -57,9 +57,9 @@ func authTokenU(conn *nex.Connection) string {
 func writeUHeaderKV(out *nex.StreamOut, u string) {
 	const kKey = "u"
 	elemBody := uint32(2 + len(kKey) + 1 + 2 + len(u) + 1)
-	out.U32(1)         // count=1
-	out.U8(0)          // element substream version
-	out.U32(elemBody)  // element substream length
+	out.U32(1)        // count=1
+	out.U8(0)         // element substream version
+	out.U32(elemBody) // element substream length
 	out.String(kKey)
 	out.String(u)
 }
@@ -112,12 +112,13 @@ func smm2PreparePostObjectCourse(conn *nex.Connection, req *nex.RMCMessage) *nex
 // Per the fresh measured_live.txt capture (course "test 6" / data_id 1011), the body
 // starts with TWO short NEX strings (u16 length prefix, not u32 — older SMM2 protocol),
 // NOT with 4× data_id_str + u64 like CompletePostObjectsCourse(68) does:
-//   u16     name_length
-//   bytes   name (e.g. "test 6\0")
-//   u16     desc_length
-//   bytes   description
-//   ...     game_style, course_theme, difficulty, level_binary (LAYOUT UNVERIFIED — see
-//           hex dumps; no reliable field order from kinnay wiki or live capture yet)
+//
+//	u16     name_length
+//	bytes   name (e.g. "test 6\0")
+//	u16     desc_length
+//	bytes   description
+//	...     game_style, course_theme, difficulty, level_binary (LAYOUT UNVERIFIED — see
+//	        hex dumps; no reliable field order from kinnay wiki or live capture yet)
 //
 // Important: the 4× data_id_str + u64 prefix is in the 68 RESPONSE payload (see
 // parseCompletePostCourseParam if needed), NOT here. The two methods have different
@@ -275,6 +276,9 @@ func smm2CompletePostRelationObject(conn *nex.Connection, req *nex.RMCMessage) *
 		courses.setCourseTimes(dataID, conn.PID, 1)
 		// Player stat: the person clearing
 		profiles.applyPlayStats(conn.PID, 0, 1, 0, 0)
+		profiles.recordClear(conn.PID, dataID)
+		profiles.recordPlay(conn.PID, dataID)
+		profiles.recordFirstClear(conn.PID, dataID)
 		// Maker stat: the owner of the course receives a clear
 		if m := courses.get(dataID); m != nil {
 			profiles.applyMakerReceived(m.OwnerPID, 0, 1, 0, 0)
@@ -313,13 +317,13 @@ func smm2CanPostRatingAndComment(conn *nex.Connection, req *nex.RMCMessage) *nex
 	// CanPostRatingAndCommentResult, all fields at their zero value — matches the
 	// reference response byte-for-byte (verified: 26 bytes total, same as this).
 	body := nex.NewStreamOut(s)
-	body.U64(0)          // unknown
-	body.Bool(false)     // unknown (can_post_rating?)
-	body.U32(0)          // unknown
-	body.U32(0)          // Map<Uint8,Uint32> #1, empty (count=0)
-	body.Bool(false)     // unknown (can_post_comment?)
-	body.U32(0)          // unknown
-	body.U32(0)          // Map<Uint8,Uint32> #2, empty (count=0)
+	body.U64(0)      // unknown
+	body.Bool(false) // unknown (can_post_rating?)
+	body.U32(0)      // unknown
+	body.U32(0)      // Map<Uint8,Uint32> #1, empty (count=0)
+	body.Bool(false) // unknown (can_post_comment?)
+	body.U32(0)      // unknown
+	body.U32(0)      // Map<Uint8,Uint32> #2, empty (count=0)
 	resp := frameStruct(s, 0, body.Bytes())
 
 	fmt.Printf("[SMM2 Storage] CanPostRatingAndComment(61) data_id=%d param=%d -> 31 bytes (all-zero result, matches the reference)\n",

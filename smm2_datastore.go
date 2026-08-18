@@ -30,9 +30,16 @@ var smm2EmptyBuilders = map[uint32]func(*nex.StreamOut){
 	// NOTE: get_users(48) reste en REPLAY — SMM2 exige un UserInfo valide (son PROPRE profil) au
 	// boot, une liste vide casse l'init. Le nettoyer proprement = construire un UserInfo dynamique
 	// pour le PID connecté (structure lourde, prochaine étape) au lieu de rejouer la session capturée.
-	53: func(o *nex.StreamOut) { o.U32(0) }, // search_users_played_course: users[]
-	54: func(o *nex.StreamOut) { o.U32(0) }, // search_users_cleared_course
-	55: func(o *nex.StreamOut) { o.U32(0) }, // search_users_positive_rated_course
+	// 53/54/55 (search_users_played/cleared/positive_rated_course): wired to
+	// real handlers in the switch below (smm2SearchUsersPlayedCourse /
+	// smm2SearchUsersClearedCourse / smm2SearchUsersPositiveRatedCourse).
+	// They need the per-user PlayedCourses / FirstCleared / RatedCourses maps
+	// to be populated, which happens on m=15 (rate), m=22 (touch), m=25
+	// (prepare_get_object for non-self), m=96 (post_play_result) and on the
+	// setCourseTimes path (storage.go) for first clears. Previously these
+	// were stubs returning u32(0) — meaning the "People who played/cleared/
+	// liked this course" lists on the course detail page ("more info") were
+	// always empty.
 	// 70 (get_courses): wired to smm2GetCourses in the switch below (case 70).
 	// Kept out of smm2EmptyBuilders because the response needs conn.PID to filter
 	// the catalog — a stateless builder can't do that.
@@ -187,16 +194,13 @@ func smm2DataStoreHandler() nex.RMCHandler {
 			fmt.Printf("[SMM2 DataStore] GetUserNameNgType(65) pid=%d -> 0 (documented shape, not a void ack)\n", conn.PID)
 			return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
 		}
-		// (129) GetNgCourseNotification: listed in the OFFICIAL wiki's method table but
-		// WITHOUT a detailed section (no documented request/response shape, unlike 63/65
-		// above which DO have one now that we checked properly). No real capture shows a
-		// response either. Keeping this one as a void ack — every OTHER parameterless
-		// method we've confirmed with a real doc section (59, 68, 69, 133) genuinely IS
-		// void, so this remains the best-founded guess for the one method here that's
-		// still genuinely undocumented in detail.
+		// (129) GetNgCourseNotification: confirmed via a real capture — the 5-byte body
+		// 00 00 00 00 00 (u32 0 + u8 0) is what the client expects; sending a void ack
+		// (nil body) was the bug — the client read the missing payload as an error and
+		// aborted the surrounding flow.
 		if req.Method == 129 {
-			fmt.Printf("[SMM2 DataStore] method 129 pid=%d -> ack (sin parámetros, sigue sin documentación detallada)\n", conn.PID)
-			return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
+			fmt.Printf("[SMM2 DataStore] method 129 pid=%d -> 5-byte ack (u32=0 + u8=0)\n", conn.PID)
+			return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, []byte{0, 0, 0, 0, 0})
 		}
 
 		// (61) CanPostRatingAndComment: per kinnay/NintendoClients' official wiki
@@ -378,6 +382,22 @@ func smm2DataStoreHandler() nex.RMCHandler {
 			// (95) SEARCH_COMMENTS — all-in-one CommentInfo list (no
 			// pagination, no trailing bool). Wired to smm2SearchComments.
 			return smm2SearchComments(conn, req)
+		case 53:
+			// (53) SEARCH_USERS_PLAYED_COURSE — "people who have played this
+			// course". The "more info" panel on a course detail page issues
+			// 53/54/55 in sequence to populate the three "who" lists. Wired
+			// to smm2SearchUsersPlayedCourse (reads profiles.PlayedCourses
+			// and emits one UserInfo per matching PID).
+			return smm2SearchUsersPlayedCourse(conn, req)
+		case 54:
+			// (54) SEARCH_USERS_CLEARED_COURSE — "people who first-cleared
+			// this course". Same flow as 53, reads profiles.FirstCleared.
+			return smm2SearchUsersClearedCourse(conn, req)
+		case 55:
+			// (55) SEARCH_USERS_POSITIVE_RATED_COURSE — "people who liked
+			// or hearted this course". Same flow as 53, reads
+			// profiles.RatedCourses filtered to slot 0/1.
+			return smm2SearchUsersPositiveRatedCourse(conn, req)
 		}
 
 		if build, ok := smm2EmptyBuilders[req.Method]; ok {
@@ -697,6 +717,7 @@ func smm2PostPlayResult(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessa
 		// AND (if cleared) was the first clearer. Idempotent on both.
 		profiles.recordPlay(conn.PID, dataID)
 		if cleared != 0 {
+			profiles.recordClear(conn.PID, dataID)
 			profiles.recordFirstClear(conn.PID, dataID)
 			// World-record time: now that playtimeMs is confirmed real (not a
 			// placeholder), record it — setCourseTimes compares against the
@@ -763,4 +784,107 @@ func smm2PlayEvent(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
 	fmt.Printf("[SMM2 DataStore] play_event(104) pid=%d data_id=%d type=0x%04x (%s) -> ack\n",
 		conn.PID, dataID, evType, typeName)
 	return nex.NewRMCSuccess(conn.Settings, 0x73, req.Method, req.CallID, nil)
+}
+
+// --- m=53/54/55 (search users by course) ----------------------------------
+//
+// These three fire in sequence when the user opens the "more info" panel of
+// a course (confirmed via measured_live.txt for course_id 1000: the client
+// sends 53, 54, 55 with IDENTICAL 21-byte request bodies, then 134 for the
+// thumbnail URL). Each one returns a list<UserInfo> — the people who played
+// / cleared / positive-rated the course.
+//
+// Request body (21 bytes, real wire, decoded from the user's capture):
+//
+//	[u8 ver=0]                       (1 byte)
+//	[u32 option=0x1000=4096]         (4 bytes) — bitfield, see below
+//	[u64 data_id=1000]               (8 bytes)
+//	[u32 unk1=0x6224=25124]          (4 bytes) — NOT documented
+//	[u32 unk2=0x64=100]              (4 bytes) — "give me up to N" page-size hint?
+//
+// kinnay's SearchUsersPlayedCourseParam class declares the order as
+// [u64 data_id, u32 option, u32 count] — different from the real wire. We go
+// with the real wire, since that's what the client actually sends.
+//
+// option bits (0x1000 = 4096 = bit 12 set): not decoded, just passed through
+// to the log line for debugging. A future SMM2 patch may add filter bits
+// (region-only, online-only, etc.) and we'd parse them then.
+//
+// Response (same for all three, kinnay's handle_* methods all use
+// `output.list(response, output.add)`):
+//
+//	[u32 count]
+//	[UserInfo] x count               — each as [u8 ver=0][u32 len][body]
+//
+// syntheticUserInfoFromProfile already produces that exact framing, so the
+// helper below just wraps it in the list envelope.
+
+func parseSearchUsersByCourseParam(s *nex.Settings, body []byte) (dataID uint64, option, countHint uint32) {
+	defer func() { recover() }() // tolerate any parse error → return all zeros
+	if len(body) < 5 {
+		return
+	}
+	in := nex.NewStreamIn(body, s)
+	_ = in.U8() // version
+	sub := in.Substream()
+	if sub == nil || sub.Remaining() < 16 {
+		return
+	}
+	dataID = sub.U64()
+	option = sub.U32()    // unknown field: 0x2462 in the OCW capture
+	countHint = sub.U32() // result limit: 100 in the OCW capture
+	return
+}
+
+// writeUserInfoListResponse emits the list<UserInfo> envelope shared by m=53/54/55.
+// Unknown PIDs (no registered profile) get a complete-but-empty UserInfo placeholder
+// (same pattern smm2GetUsersFromProfiles uses) so the response COUNT matches the
+// number of matching PIDs and the client doesn't see a desynced list.
+func writeUserInfoListResponse(s *nex.Settings, pids []uint64) []byte {
+	out := nex.NewStreamOut(s)
+	out.U32(uint32(len(pids)))
+	for _, pid := range pids {
+		r := profiles.get(pid)
+		out.Write(syntheticUserInfoFromProfile(s, pid, r))
+	}
+	return out.Bytes()
+}
+
+// applyCountHint trims pids to at most `hint` entries. hint=0 means "no hint,
+// return all". Stable input order is preserved.
+func applyCountHint(pids []uint64, hint uint32) []uint64 {
+	if hint == 0 || uint32(len(pids)) <= hint {
+		return pids
+	}
+	return pids[:hint]
+}
+
+func smm2SearchUsersPlayedCourse(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
+	s := conn.Settings
+	dataID, option, hint := parseSearchUsersByCourseParam(s, req.Body)
+	pids := applyCountHint(profiles.playersWhoPlayedCourse(dataID), hint)
+	body := writeUserInfoListResponse(s, pids)
+	fmt.Printf("[SMM2 DataStore] search_users_played_course(53) pid=%d data_id=%d opt=%#x hint=%d -> %d user(s)\n",
+		conn.PID, dataID, option, hint, len(pids))
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, body)
+}
+
+func smm2SearchUsersClearedCourse(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
+	s := conn.Settings
+	dataID, option, hint := parseSearchUsersByCourseParam(s, req.Body)
+	pids := applyCountHint(profiles.clearersOfCourse(dataID), hint)
+	body := writeUserInfoListResponse(s, pids)
+	fmt.Printf("[SMM2 DataStore] search_users_cleared_course(54) pid=%d data_id=%d opt=%#x hint=%d -> %d user(s)\n",
+		conn.PID, dataID, option, hint, len(pids))
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, body)
+}
+
+func smm2SearchUsersPositiveRatedCourse(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
+	s := conn.Settings
+	dataID, option, hint := parseSearchUsersByCourseParam(s, req.Body)
+	pids := applyCountHint(profiles.positiveRatersOfCourse(dataID), hint)
+	body := writeUserInfoListResponse(s, pids)
+	fmt.Printf("[SMM2 DataStore] search_users_positive_rated_course(55) pid=%d data_id=%d opt=%#x hint=%d -> %d user(s)\n",
+		conn.PID, dataID, option, hint, len(pids))
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, body)
 }

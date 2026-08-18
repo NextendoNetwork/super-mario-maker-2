@@ -1,4 +1,4 @@
-﻿package main
+package main
 
 // Persistent maker-profile registry.
 //
@@ -172,8 +172,9 @@ type registeredProfile struct {
 	// only stores the most recent (which is what search_courses_positive_rated_by
 	// needs: a course appears here if the LATEST rating is positive, i.e.
 	// slot 0 or 1). m=15 (rate_object) is the writer.
-	PlayedCourses map[uint64]bool `json:"played_courses,omitempty"`
-	RatedCourses map[uint64]uint8 `json:"rated_courses,omitempty"`
+	PlayedCourses  map[uint64]bool  `json:"played_courses,omitempty"`
+	RatedCourses   map[uint64]uint8 `json:"rated_courses,omitempty"`
+	ClearedCourses map[uint64]bool  `json:"cleared_courses,omitempty"`
 
 	// --- Per-user first-clears: courses this PID was the FIRST to clear
 	// (set by setCourseTimes in storage.go on the first replay upload).
@@ -333,10 +334,28 @@ func (p *profileRegistry) recordFirstClear(pid, dataID uint64) {
 	if r.FirstCleared == nil {
 		r.FirstCleared = map[uint64]bool{}
 	}
-	if r.FirstCleared[dataID] {
+	if r.ClearedCourses[dataID] {
 		return
 	}
 	r.FirstCleared[dataID] = true
+	p.persistLocked()
+}
+
+// recordClear is separate from FirstCleared: method 54 asks for every player who cleared a course, while method 80 asks only for first clears.
+func (p *profileRegistry) recordClear(pid, dataID uint64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	r := p.byPID[pid]
+	if r == nil {
+		return
+	}
+	if r.ClearedCourses == nil {
+		r.ClearedCourses = map[uint64]bool{}
+	}
+	if r.ClearedCourses[dataID] {
+		return
+	}
+	r.ClearedCourses[dataID] = true
 	p.persistLocked()
 }
 
@@ -391,12 +410,68 @@ func (p *profileRegistry) coursesFirstCleared(pid uint64) []uint64 {
 	return out
 }
 
+// playersWhoPlayedCourse returns the PIDs that have played dataID, in
+// stable iteration order. Source: each profile's PlayedCourses map. Returns
+// nil if nobody has played it. Powers m=53 (search_users_played_course).
+//
+// SCAN, not a cached index. For 2-3 profiles (today's reality) this is
+// instant; if the profile count grows large we'd add a parallel
+// courseID→set<PID> map alongside the per-user relations. Keeping the
+// source of truth in ONE place (the per-user map) is worth the iteration
+// cost at this scale — no two-index desync to debug.
+func (p *profileRegistry) playersWhoPlayedCourse(dataID uint64) []uint64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var out []uint64
+	for pid, r := range p.byPID {
+		if r.PlayedCourses[dataID] {
+			out = append(out, pid)
+		}
+	}
+	return out
+}
+
+// clearersOfCourse returns the PIDs that have FIRST-cleared dataID, in
+// stable iteration order. Source: each profile's FirstCleared map. Returns
+// nil if nobody has first-cleared it. Powers m=54 (search_users_cleared_course).
+func (p *profileRegistry) clearersOfCourse(dataID uint64) []uint64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var out []uint64
+	for pid, r := range p.byPID {
+		if r.ClearedCourses[dataID] {
+			out = append(out, pid)
+		}
+	}
+	return out
+}
+
+// positiveRatersOfCourse returns the PIDs whose LATEST rating on dataID is
+// positive (slot 0=like or 1=heart, NOT 2=boo), in stable iteration order.
+// Source: each profile's RatedCourses map. Returns nil if nobody has
+// rated it positively. Powers m=55 (search_users_positive_rated_course).
+//
+// "Latest" is key: a user who re-rated from heart (slot 1) to boo (slot 2)
+// should NOT appear here. The slot overwrite is what recordRate does.
+func (p *profileRegistry) positiveRatersOfCourse(dataID uint64) []uint64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var out []uint64
+	for pid, r := range p.byPID {
+		if slot, ok := r.RatedCourses[dataID]; ok && (slot == 0 || slot == 1) {
+			out = append(out, pid)
+		}
+	}
+	return out
+}
+
 // recordRating applies a rate_object(15) event to pid's maker stats.
 //
 // slot mapping (SMM2's DataStoreRatingTarget.slot):
-//   0 = like  → Maker.LikesReceived++
-//   1 = heart → Maker.HeartsReceived++  (tentative; slot-to-type mapping isn't
-//   2 = boo   → Maker.BoosReceived++    documented anywhere we can verify)
+//
+//	0 = like  → Maker.LikesReceived++
+//	1 = heart → Maker.HeartsReceived++  (tentative; slot-to-type mapping isn't
+//	2 = boo   → Maker.BoosReceived++    documented anywhere we can verify)
 //
 // ratingValue of 0 typically means "cleared/reset a previous rating", so we DON'T
 // count those — the previous rating stays in the aggregate. Only strictly-positive
@@ -781,18 +856,18 @@ func syntheticUserInfoFromProfile(s *nex.Settings, pid uint64, r *registeredProf
 	out.QBuffer(mii)                   // unk2: Mii bytes, real if registered
 	out.String(country)
 	out.U8(region)
-	out.DateTime(nex.NowDateTime().Value()) // last_active
-	out.Bool(false)                         // unk3
-	out.Bool(false)                         // unk4
-	out.Bool(false)                         // unk5
-	writeU8U32Map(out, buildPlayStatsMap(play))                  // play_stats (PlayStatsKeys)
-	writeU8U32Map(out, buildMakerStatsMap(maker))                // maker_stats (only verified keys; see comment)
-	writeU8U32Map(out, endless)                                  // endless_challenge_high_scores
-	writeU8U32Map(out, buildMultiplayerStatsMap(multi))          // multiplayer_stats (MultiplayerStatsKeys)
-	writeU8U32Map(out, unk7)                                     // unk7
-	writeBadgeInfoList(out, badges)                              // badges: List<BadgeInfo>
-	writeU8U32Map(out, unk8)                                     // unk8
-	writeU8U32Map(out, unk9)                                     // unk9
+	out.DateTime(nex.NowDateTime().Value())             // last_active
+	out.Bool(false)                                     // unk3
+	out.Bool(false)                                     // unk4
+	out.Bool(false)                                     // unk5
+	writeU8U32Map(out, buildPlayStatsMap(play))         // play_stats (PlayStatsKeys)
+	writeU8U32Map(out, buildMakerStatsMap(maker))       // maker_stats (only verified keys; see comment)
+	writeU8U32Map(out, endless)                         // endless_challenge_high_scores
+	writeU8U32Map(out, buildMultiplayerStatsMap(multi)) // multiplayer_stats (MultiplayerStatsKeys)
+	writeU8U32Map(out, unk7)                            // unk7
+	writeBadgeInfoList(out, badges)                     // badges: List<BadgeInfo>
+	writeU8U32Map(out, unk8)                            // unk8
+	writeU8U32Map(out, unk9)                            // unk9
 	return frameStruct(s, 0, out.Bytes())
 }
 
@@ -827,7 +902,7 @@ func syntheticSyncProfileResult(s *nex.Settings, pid uint64, r *registeredProfil
 	out.String(name)
 	out.Write(frameStruct(s, 0, r.unk1Bytes())) // UnknownStruct1: real if we have it
 	out.QBuffer(r.miiBytes())                   // real Mii bytes if registered
-	out.U8(0)                        // unknown
+	out.U8(0)                                   // unknown
 	out.String(country)
 	out.U8(0)       // unknown
 	out.Bool(false) // unknown

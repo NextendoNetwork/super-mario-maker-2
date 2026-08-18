@@ -20,7 +20,7 @@ var (
 	captureOpenTried bool
 )
 
-// captureRMC appends one request frame to the measured file (no-op unless SMM2_CAPTURE set).
+// captureRMC appends one request or response frame to the measured file (no-op unless SMM2_CAPTURE set).
 func captureRMC(tag string, req *nex.RMCMessage) {
 	if captureFile == "" {
 		return
@@ -32,7 +32,7 @@ func captureRMC(tag string, req *nex.RMCMessage) {
 			return
 		}
 		captureOpenTried = true
-		f, err := os.Create(captureFile)
+		f, err := os.OpenFile(captureFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 		if err != nil {
 			fmt.Printf("[SMM2 measured] cannot open %s: %v\n", captureFile, err)
 			return
