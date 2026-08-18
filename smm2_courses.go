@@ -758,24 +758,20 @@ func smm2SearchCoursesPostedBy(conn *nex.Connection, req *nex.RMCMessage) *nex.R
 // was never even reached — explaining the spurious "0 courses" for
 // SearchCoursesPostedBy(74) even for an account with real uploads.
 func parseSearchCoursesPostedByParam(s *nex.Settings, body []byte) (ownerPID uint64, offset, size uint32) {
-	defer func() { recover() }()
-	in := nex.NewStreamIn(body, s)
-	_ = in.U8() // SearchCoursesPostedByParam struct version
-	sub := in.Substream()
-	_ = sub.U32() // option (ignored: we don't filter on it)
-	_ = sub.U8()  // ResultRange: version byte
-	_ = sub.U32() // ResultRange: length (always 8 for {offset,size} — not used, we know the shape)
-	offset = sub.U32()
-	size = sub.U32()
-	n := sub.U32()
-	if n > 0 {
-		ownerPID = sub.U64()
-		// Drain the rest of the list even though we only act on the first pid; the
-		// spec allows multiple pids in one request and a future feature may want them.
-		for i := uint32(1); i < n; i++ {
-			_ = sub.U64()
+	parseParamStream(s, body, func(sub *nex.StreamIn) bool {
+		_ = sub.U32() // option (ignored: we don't filter on it)
+		offset, size = readResultRange(sub)
+		n := sub.U32()
+		if n > 0 {
+			ownerPID = sub.U64()
+			// Drain the rest of the list even though we only act on the first pid; the
+			// spec allows multiple pids in one request and a future feature may want them.
+			for i := uint32(1); i < n; i++ {
+				_ = sub.U64()
+			}
 		}
-	}
+		return true
+	})
 	return
 }
 
@@ -785,13 +781,12 @@ func parseSearchCoursesPostedByParam(s *nex.Settings, body []byte) (ownerPID uin
 // (pid, count). count is the client's hint for "give me up to N courses";
 // we honour it as the page size (0 → return everything).
 func parseSearchCoursesByPIDParam(s *nex.Settings, body []byte) (pid uint64, count uint32) {
-	defer func() { recover() }()
-	in := nex.NewStreamIn(body, s)
-	_ = in.U8() // param struct version
-	sub := in.Substream()
-	_ = sub.U32() // option (CourseOption bitmask; ignored for now)
-	count = sub.U32()
-	pid = sub.U64()
+	parseParamStream(s, body, func(sub *nex.StreamIn) bool {
+		_ = sub.U32() // option (CourseOption bitmask; ignored for now)
+		count = sub.U32()
+		pid = sub.U64()
+		return true
+	})
 	return
 }
 
@@ -801,16 +796,12 @@ func parseSearchCoursesByPIDParam(s *nex.Settings, body []byte) (pid uint64, cou
 // NOTE: pid comes FIRST here, unlike 75/76 where it's last — kinnay's
 // docs have the params in a different field order than I expected.
 func parseSearchCoursesFirstClearParam(s *nex.Settings, body []byte) (pid uint64, offset, size uint32) {
-	defer func() { recover() }()
-	in := nex.NewStreamIn(body, s)
-	_ = in.U8() // param struct version
-	sub := in.Substream()
-	pid = sub.U64()
-	_ = sub.U32() // option
-	_ = sub.U8()  // ResultRange: version
-	_ = sub.U32() // ResultRange: length
-	offset = sub.U32()
-	size = sub.U32()
+	parseParamStream(s, body, func(sub *nex.StreamIn) bool {
+		pid = sub.U64()
+		_ = sub.U32() // option
+		offset, size = readResultRange(sub)
+		return true
+	})
 	return
 }
 
@@ -1067,18 +1058,13 @@ func smm2RateObject(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
 // matching how every other documented DataStoreClientSMM2 method on the wiki
 // receives its extra bools.
 func parseRateObjectParam(s *nex.Settings, body []byte) (dataID uint64, slot uint8, ratingValue int32, ok bool) {
-	defer func() {
-		if recover() != nil {
-			ok = false
-		}
-	}()
-	in := nex.NewStreamIn(body, s)
-	_ = in.U8() // RateObjectParam struct version
-	sub := in.Substream()
-	dataID = sub.U64()
-	slot = sub.U8()
-	ratingValue = sub.S32()
-	_ = sub.U32() // access_password (ignored)
+	parseParamStream(s, body, func(sub *nex.StreamIn) bool {
+		dataID = sub.U64()
+		slot = sub.U8()
+		ratingValue = sub.S32()
+		_ = sub.U32() // access_password (ignored)
+		return true
+	})
 	ok = true
 	return
 }

@@ -195,16 +195,19 @@ func smm2GetUsers(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
 // parseGetUsersPIDs reads GetUsersParam { pids: list<pid>, option: u32 } from the
 // request. Falls back to the caller's own pid if the list is empty or implausible.
 func parseGetUsersPIDs(conn *nex.Connection, req *nex.RMCMessage) []uint64 {
-	in := nex.NewStreamIn(req.Body, conn.Settings)
-	_ = in.U8()           // GetUsersParam struct version
-	sub := in.Substream() // param body
-	n := sub.U32()
-	if n == 0 || n > 256 {
+	var pids []uint64
+	if _, ok := parseParamStream(conn.Settings, req.Body, func(sub *nex.StreamIn) bool {
+		n := sub.U32()
+		if n == 0 || n > 256 {
+			return true
+		}
+		pids = make([]uint64, 0, n)
+		for i := uint32(0); i < n; i++ {
+			pids = append(pids, sub.PID())
+		}
+		return true
+	}); !ok {
 		return []uint64{conn.PID}
-	}
-	pids := make([]uint64, 0, n)
-	for i := uint32(0); i < n; i++ {
-		pids = append(pids, sub.PID())
 	}
 	if len(pids) == 0 {
 		return []uint64{conn.PID}
@@ -216,15 +219,16 @@ func parseGetUsersPIDs(conn *nex.Connection, req *nex.RMCMessage) []uint64 {
 // GetUsersParam, separate from parseGetUsersPIDs so nothing that already depends on
 // that function's exact signature is touched.
 func parseGetUsersOption(conn *nex.Connection, req *nex.RMCMessage) uint32 {
-	in := nex.NewStreamIn(req.Body, conn.Settings)
-	_ = in.U8()
-	sub := in.Substream()
-	n := sub.U32()
-	for i := uint32(0); i < n; i++ {
-		_ = sub.PID()
-	}
-	if sub.Remaining() >= 4 {
-		return sub.U32()
-	}
-	return 0
+	var option uint32
+	parseParamStream(conn.Settings, req.Body, func(sub *nex.StreamIn) bool {
+		n := sub.U32()
+		for i := uint32(0); i < n; i++ {
+			_ = sub.PID()
+		}
+		if sub.Remaining() >= 4 {
+			option = sub.U32()
+		}
+		return true
+	})
+	return option
 }

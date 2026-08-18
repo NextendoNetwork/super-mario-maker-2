@@ -132,21 +132,20 @@ func smm2PreparePostObjectCourse(conn *nex.Connection, req *nex.RMCMessage) *nex
 // the wrong style/theme/diff defaults are filtered out by 70/73 returning empty
 // anyway, so the user-visible impact is just a log warning, not a broken upload.
 func parsePreparePostCourseParam(s *nex.Settings, body []byte) (name, description string, tags []uint8, gameStyle, courseTheme, difficulty uint8) {
-	defer func() { recover() }()
-	in := nex.NewStreamIn(body, s)
-	_ = in.U8()           // struct version
-	sub := in.Substream() // param body
-	name = sub.String()
-	description = sub.String()
-	tagCount := sub.U32()
-	if tagCount <= 8 {
-		for i := uint32(0); i < tagCount; i++ {
-			tags = append(tags, sub.U8())
+	parseParamStream(s, body, func(sub *nex.StreamIn) bool {
+		name = sub.String()
+		description = sub.String()
+		tagCount := sub.U32()
+		if tagCount <= 8 {
+			for i := uint32(0); i < tagCount; i++ {
+				tags = append(tags, sub.U8())
+			}
 		}
-	}
-	gameStyle = sub.U8()
-	courseTheme = sub.U8()
-	difficulty = sub.U8()
+		gameStyle = sub.U8()
+		courseTheme = sub.U8()
+		difficulty = sub.U8()
+		return true
+	})
 	return
 }
 

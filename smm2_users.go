@@ -690,25 +690,19 @@ func (r *registeredProfile) unk1Bytes() []byte {
 //	String countryCode
 //	String pseudoDeviceID
 func parseRegisterUserParam(s *nex.Settings, body []byte) (username string, unk1, miiData []byte, regionID uint8, countryCode, pseudoDeviceID string, ok bool) {
-	defer func() {
-		if recover() != nil {
-			ok = false
-		}
-	}()
-	in := nex.NewStreamIn(body, s)
-	_ = in.U8() // RegisterUserParam struct version
-	p := in.Substream()
+	parseParamStream(s, body, func(p *nex.StreamIn) bool {
+		username = p.String()
 
-	username = p.String()
+		_ = p.U8() // UnknownStruct1 version
+		unk1Sub := p.Substream()
+		unk1 = unk1Sub.ReadAll()
 
-	_ = p.U8() // UnknownStruct1 version
-	unk1Sub := p.Substream()
-	unk1 = unk1Sub.ReadAll()
-
-	miiData = p.QBuffer()
-	regionID = p.U8()
-	countryCode = p.String()
-	pseudoDeviceID = p.String()
+		miiData = p.QBuffer()
+		regionID = p.U8()
+		countryCode = p.String()
+		pseudoDeviceID = p.String()
+		return true
+	})
 	ok = true
 	return
 }

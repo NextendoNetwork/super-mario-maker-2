@@ -57,20 +57,45 @@ func writeEmptyListListBool(o *nex.StreamOut) {
 // Param stream opener — used by every parseXxx() function.
 // ============================================================================
 
-// openParamStream opens a SMM2-style param body: [u8 version][u32 substream]
-// and returns the substream. ok=false if the body was too short to parse
-// (caller returns zero values).
+// parseParamStream opens a SMM2-style param body and runs fn with the
+// resulting substream. If the body is too short, substream() returns nil,
+// or fn panics, returns the zero value of T and ok=false. The recover
+// inside means field reads on a malformed body don't propagate panics
+// to the caller — preserving the prior behaviour of every parseXxx's
+// `defer func() { recover() }()`.
 //
-// All SMM2 DataStore methods follow this pattern, so the helper replaces 8
-// `defer recover` + 8 `U8` + 8 `Substream` blocks with one call.
-func openParamStream(s *nex.Settings, body []byte) (sub *nex.StreamIn, ok bool) {
-	defer func() { recover() }()
+// Generic over T so each parseXxx returns its specific type. The closure
+// should return T; the helper wraps it.
+//
+// Usage:
+//   func parseFoo(s *nex.Settings, body []byte) (a, b uint32) {
+//       parseParamStream(s, body, func(sub *nex.StreamIn) bool {
+//           _ = sub.U32()           // option
+//           a, b = sub.U32(), sub.U32()
+//           return true
+//       })
+//       return
+//   }
+//
+// The closure's return is a marker (true=parsed, false=invalid); the
+// real values come from the outer named returns via closure capture.
+func parseParamStream[T any](s *nex.Settings, body []byte, fn func(*nex.StreamIn) T) (T, bool) {
+	var zero T
+	defer func() {
+		if r := recover(); r != nil {
+			// swallow; zero value will be returned
+		}
+	}()
 	if len(body) < 5 {
-		return nil, false
+		return zero, false
 	}
 	in := nex.NewStreamIn(body, s)
 	_ = in.U8()
-	return in.Substream(), true
+	sub := in.Substream()
+	if sub == nil {
+		return zero, false
+	}
+	return fn(sub), true
 }
 
 // readResultRange reads the ResultRange sub-structure embedded in many
