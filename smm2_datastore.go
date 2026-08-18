@@ -51,7 +51,7 @@ var smm2EmptyBuilders = map[uint32]func(*nex.StreamOut){
 	// 70 (get_courses): wired to smm2GetCourses in the switch below (case 70).
 	// Kept out of smm2EmptyBuilders because the response needs conn.PID to filter
 	// the catalog — a stateless builder can't do that.
-	71: func(o *nex.StreamOut) { o.U32(0); o.U32(0); o.Bool(true) }, // point_ranking: courses[], ranks[], result
+	71: writeEmptyListListBool, // point_ranking: courses[], ranks[], result
 	// 73 (search_courses_latest / "New Courses"): wired to smm2SearchCoursesLatest
 	// in the switch below, now that CourseInfo is confirmed working.
 	// 74 (search_courses_posted_by): wired to smm2SearchCoursesPostedBy in the
@@ -63,16 +63,16 @@ var smm2EmptyBuilders = map[uint32]func(*nex.StreamOut){
 	// are wired to real handlers in the switch above (smm2SearchCourses*)
 	// — they need profiles.coursesPlayed/Rated/FirstCleared to be populated,
 	// which happens on m=15 (rate) and m=22/m=96 (touch / post_play).
-	79: func(o *nex.StreamOut) { o.U32(0) },               // search_courses_endless_mode
-	82: func(o *nex.StreamOut) { o.U32(0); o.Bool(true) }, // search_courses_followee_posted_by: courses[], result — confirmed via measured_live.txt: fell to NotFound (method=0 in the S->C log) since it was missing from this map
-	85: func(o *nex.StreamOut) { o.U32(0); o.U32(0) },     // get_courses_event: courses[], results[]
-	86: func(o *nex.StreamOut) { o.U32(0) },               // search_courses_event
+	79: writeEmptyList,         // search_courses_endless_mode
+	82: writeEmptyListBool,     // search_courses_followee_posted_by: courses[], result — confirmed via measured_live.txt: fell to NotFound (method=0 in the S->C log) since it was missing from this map
+	85: writeEmptyListList,     // get_courses_event: courses[], results[]
+	86: writeEmptyList,         // search_courses_event
 	// 94/95 (search_comments_in_order / search_comments): wired to real
 	// handlers in the case-switch above (smarter than the all-zero fallback —
 	// they need the comment store to be loaded at startup, which init() in
 	// smm2_comments.go does).
-	160: func(o *nex.StreamOut) { o.U32(0); o.U32(0) }, // get_world_map: maps[], results[]
-	162: func(o *nex.StreamOut) { o.U32(0) },           // search_world_map_pick_up: maps[]
+	160: writeEmptyListList,     // get_world_map: maps[], results[]
+	162: writeEmptyList,         // search_world_map_pick_up: maps[]
 
 	// (103) get_death_positions: data_id:int -> list[DeathPositionInfo]. DOCUMENTED
 	// (nintendoclients.readthedocs.io) but never implemented — fell through to
@@ -83,33 +83,33 @@ var smm2EmptyBuilders = map[uint32]func(*nex.StreamOut){
 	// exactly what crashes rendering (matches the reported "spinner then instant
 	// fail, nothing shown" symptom). We have no death-position data to report, so
 	// an empty list is the correct honest answer regardless.
-	103: func(o *nex.StreamOut) { o.U32(0) }, // get_death_positions: list<DeathPositionInfo>
+	103: writeEmptyList, // get_death_positions: list<DeathPositionInfo>
 
 	// --- Leaderboard-facing methods, per kinnay/NintendoClients wiki (Data-Store-Protocol SMM2) —
 	//     none were implemented before, so Leaderboards fell through to NotFound. Same "empty
 	//     tuple" pattern; a List<UserInfo> and a List<CourseInfo> both encode as U32(0) when empty,
 	//     so labeling doesn't matter for the empty case.
-	50: func(o *nex.StreamOut) { o.U32(0); o.U32(0); o.Bool(true) }, // search_users_user_point: users[], ranks[], result
-	51: func(o *nex.StreamOut) { o.U32(0); o.U32(0); o.Bool(true) }, // search_users_endless_mode: users[], unk[], unk
-	52: func(o *nex.StreamOut) { o.U32(0); o.U32(0); o.Bool(true) }, // search_users_battle_mode: users[], unk[], unk
-	56: func(o *nex.StreamOut) { o.U32(0); o.Bool(true) },           // search_users_followee: users[], unk
-	57: func(o *nex.StreamOut) { o.U32(0); o.U32(0); o.Bool(true) }, // search_users_clear_ranking: users[], unk[], unk
+	50: writeEmptyListListBool, // search_users_user_point: users[], ranks[], result
+	51: writeEmptyListListBool, // search_users_endless_mode: users[], unk[], unk
+	52: writeEmptyListListBool, // search_users_battle_mode: users[], unk[], unk
+	56: writeEmptyListBool,     // search_users_followee: users[], unk
+	57: writeEmptyListListBool, // search_users_clear_ranking: users[], unk[], unk
 
 	// --- NOT documented at all by kinnay/NintendoClients (no request/response shape given).
 	//     Traced by call sequence in measured_live.txt: 147 fires right before the client
 	//     re-prompts Mii/name creation (the "M" leaderboard tab); 168 fires right before the
 	//     "Favorites" error. Best-guess empty tuple, same shape as their documented siblings —
 	//     unverified, revisit if a real capture or doc turns up.
-	147: func(o *nex.StreamOut) { o.U32(0); o.Bool(true) }, // search_users_official (undocumented)
-	168: func(o *nex.StreamOut) { o.U32(0); o.Bool(true) }, // search_users_followee_v2 (undocumented)
+	147: writeEmptyListBool, // search_users_official (undocumented)
+	168: writeEmptyListBool, // search_users_followee_v2 (undocumented)
 
 	// --- Méthodes NON documentées (SMM2 3.x) qui peuplent le HUB Course World (Hot/Popular/New) :
 	//     structure déduite en parsant les réponses capturées (list<CourseInfo>[+ranks][+bool]).
 	//     Ce sont elles qui affichaient les faux niveaux Nintendo -> on les vide aussi.
-	58: func(o *nex.StreamOut) { o.U32(0); o.U32(0); o.Bool(true) }, // courses[], ranks[], result (comme 83)
-	72: func(o *nex.StreamOut) { o.U32(0); o.Bool(true) },           // courses[], result
-	83: func(o *nex.StreamOut) { o.U32(0); o.U32(0); o.Bool(true) }, // courses[], ranks[], result (Popular)
-	84: func(o *nex.StreamOut) { o.U32(0) },                         // courses[] (Hot/New)
+	58: writeEmptyListListBool, // courses[], ranks[], result (comme 83)
+	72: writeEmptyListBool,     // courses[], result
+	83: writeEmptyListListBool, // courses[], ranks[], result (Popular)
+	84: writeEmptyList,         // courses[] (Hot/New)
 }
 
 // smm2DataStoreHandler : contenu -> VIDE ; sinon -> replay capturé (méthodes structurelles du
