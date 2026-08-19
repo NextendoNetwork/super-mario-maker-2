@@ -55,6 +55,23 @@ func writeDataStoreReqPostInfo(s *nex.Settings, dataID uint64, url string) []byt
 	return frameStruct(s, 0, body.Bytes())
 }
 
+// writeRelationObjectReqPostInfo emits the framed RelationObjectReqPostInfo
+// response used by m=132 (prepare_post_relation_object). Shape per kinnay/
+// NintendoClients: data_id string, url string, headers list<KV>, form
+// list<KV>, root_ca_cert buffer. The data_id is a STRING here (not a u64
+// like DataStoreReqPostInfo) and ECHOES the request's data_id (the course's
+// own data_id, e.g. "1001") — the per-object routing key still goes in the
+// "key" form field, which we leave empty since the URL path carries the key.
+func writeRelationObjectReqPostInfo(s *nex.Settings, dataID, url string) []byte {
+	body := nex.NewStreamOut(s)
+	body.String(dataID)          // data_id: ECHO the course's own data_id, not a generated key
+	body.String(url)             // url
+	writeKeyValueList(body, nil) // headers: none
+	writeKeyValueList(body, nil) // form: empty — client POSTs blob directly
+	body.Buffer(courses.rootCA)  // root_ca_cert (empty on emulator; Nextendo CA in prod)
+	return frameStruct(s, 0, body.Bytes())
+}
+
 // fallbackNEXToken is the fixed Ryujinx-Nextendo dev token. Used when
 // conn.NEXToken is empty (Ryujinx doesn't send the NEX header).
 const fallbackNEXToken = "4If9rL9JRLMmEvD30GAxDl"
@@ -243,17 +260,9 @@ func smm2PrepareRelationUpload(conn *nex.Connection, req *nex.RMCMessage) *nex.R
 	key := relationKey(dataID, relType) // "<dataID>/<relType>"
 	url := fmt.Sprintf("%s/relation/%s", storageURL, key)
 
-	body := nex.NewStreamOut(s)
-	body.String(requestedDataID) // data_id: ECHO the course's own data_id, not a generated key
-	body.String(url)
-	writeKeyValueList(body, nil) // headers: none
-	writeKeyValueList(body, nil) // form: empty — same as method 66; client POSTs blob directly
-	body.Buffer(courses.rootCA)
-	resp := frameStruct(s, 0, body.Bytes())
-
 	fmt.Printf("[SMM2 Storage] PreparePostRelationObject(132) type=%d size=%d pid=%d data_id=%q key=%q -> construit depuis le schéma documenté (data_id échо)\n",
 		relType, reqSize, conn.PID, requestedDataID, key)
-	return nex.NewRMCSuccess(s, 0x73, 132, req.CallID, resp)
+	return nex.NewRMCSuccess(s, 0x73, 132, req.CallID, writeRelationObjectReqPostInfo(s, requestedDataID, url))
 }
 
 // smm2CompletePostRelationObject (133): parses [u8 ver][u32 substream][String
