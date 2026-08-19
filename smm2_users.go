@@ -815,37 +815,49 @@ func buildMakerStatsMap(m makerStats) map[uint8]uint32 {
 // userInfoFields is the resolved shape for one PID's UserInfo payload, after
 // applying defaults from pseudoOr() and overrides from a registered profile
 // (if any). The "empty" defaults match what we want a stranger-PID to look
-// like: name = pseudoOr(pid), no unk1/mii, empty country, region 0, zero stats.
+// like: name = pseudoOr(pid), 8-byte default unk1, empty country, region 0,
+// zero stats, 36 zero bytes of Nintendo extension trailing.
+//
 // Splits "what to put in" (resolve) from "how to put it on the wire" (write).
 type userInfoFields struct {
-	name    string
-	unk1    []byte
-	mii     []byte
-	country string
-	region  uint8
-	play    playStats
-	maker   makerStats
-	multi   multiplayerStats
-	endless map[uint8]uint32
-	badges  []badgeInfo
-	unk7    map[uint8]uint32
-	unk8    map[uint8]uint32
-	unk9    map[uint8]uint32
+	name     string
+	unk1     []byte
+	mii      []byte
+	country  string
+	region   uint8
+	play     playStats
+	maker    makerStats
+	multi    multiplayerStats
+	endless  map[uint8]uint32
+	badges   []badgeInfo
+	unk7     map[uint8]uint32
+	unk8     map[uint8]uint32
+	unk9     map[uint8]uint32
+	Trailing []byte // 36-byte Nintendo extension block (see emitNintendoExtension)
 }
 
 // resolveUserInfoFields returns the filled-in field set for one PID from a
 // registered profile. If r is nil, returns the empty defaults. Each field is
 // a direct copy of the profile's stored value — no transformation. Adding
 // a new profile field is a 2-line change here + one wire field in writeUserInfo.
+//
+// The unk1 default for empty profiles is 8 zero bytes (not nil) — verified
+// 18/8 against the beertest capture: the SMM2 client aborts avatar creation
+// when unk1 is shorter than 13 bytes (ver=0 + len=8 + 8 zero body).
 func resolveUserInfoFields(pid uint64, r *registeredProfile) userInfoFields {
-	f := userInfoFields{name: pseudoOr(pid)}
+	f := userInfoFields{
+		name: pseudoOr(pid),
+		unk1: make([]byte, 8), // 8 zero bytes — default for empty profiles
+	}
 	if r == nil {
 		return f
 	}
 	if r.Username != "" {
 		f.name = r.Username
 	}
-	f.unk1 = r.unk1Bytes()
+	if r.unk1Bytes() != nil {
+		f.unk1 = r.unk1Bytes()
+	}
 	f.mii = r.miiBytes()
 	f.country = r.CountryCode
 	f.region = r.RegionID
@@ -860,25 +872,35 @@ func resolveUserInfoFields(pid uint64, r *registeredProfile) userInfoFields {
 	return f
 }
 
-// writeUserInfo emits the full version-0 UserInfo wire format from resolved
-// fields. 18 fields, grouped:
+// writeUserInfo emits the full UserInfo wire format from resolved fields.
 //
-//	header (7)  — PID, code, name, unk1, mii, country, region
-//	last_active (1)
-//	3 unknown bools (3)
-//	5 stat maps  (5) — play, maker, endless, multi, unk7
-//	badge list   (1)
-//	3 trailing unknown maps (3) — unk8, unk9 + frame
+// Wire layout (per real Nintendo SMM2 captures — measured_live.txt + ocw captures):
 //
-// Order, types, and framing match the kinnay/nintendoclients UserInfo shape
-// exactly. Helpers (writeU8U32Map, writeBoolFalse3, writeDateTimeNow,
-// writeBadgeInfoList) keep this to one wire call per logical field.
+//	header (7)       — PID, code, name, unk1, mii, country, region
+//	last_active (1)  — DateTime
+//	3 bools (3)      — unk3/4/5
+//	5 stat maps (5)   — play, maker, endless, multi, unk7
+//	badges list (1)
+//	3 maps (3)       — unk8, unk9 + something Nintendo adds in v3
+//	36 trailing (36) — Nintendo extension block (see SMM2User struct).
+//	                  Empty profile: all zeros. Registered: profile_value + stats
+//	                  (full mapping TBD — see comment on emitNintendoExtension).
+//
+// Order, types, and framing match the captured real Nintendo traffic. Helpers
+// (writeU8U32Map, writeBoolFalse3, writeDateTimeNow, writeBadgeInfoList) keep
+// this to one wire call per logical field.
+//
+// Version is 3, not 0 — v0 makes the SMM2 client reject get_users(48)
+// responses (verified 18/8 against an empty-profile capture: the client
+// aborts avatar creation with v=0 + empty unk1). unk1 must always be 13
+// bytes (ver=0 + len=8 + 8-byte default body), not 5 bytes (empty body),
+// even when there's no captured UnknownStruct1 — same fix.
 func writeUserInfo(s *nex.Settings, pid uint64, f userInfoFields) []byte {
 	out := nex.NewStreamOut(s)
 	out.PID(pid)
 	out.String(makerCode(pid))
 	out.String(f.name)
-	out.Write(frameStruct(s, 0, f.unk1)) // unk1: UnknownStruct1 (pose/hat/shirt/pants), real if captured
+	out.Write(frameStruct(s, 0, f.unk1)) // unk1: UnknownStruct1 (pose/hat/shirt/pants)
 	out.QBuffer(f.mii)                    // unk2: Mii bytes, real if registered
 	out.String(f.country)
 	out.U8(f.region)
@@ -892,7 +914,35 @@ func writeUserInfo(s *nex.Settings, pid uint64, f userInfoFields) []byte {
 	writeBadgeInfoList(out, f.badges)                      // badges: List<BadgeInfo>
 	writeU8U32Map(out, f.unk8)                             // unk8
 	writeU8U32Map(out, f.unk9)                             // unk9
-	return frameStruct(s, 0, out.Bytes())
+	emitNintendoExtension(out, f)                          // 36-byte Nintendo extension (see comment above)
+	return frameStruct(s, 3, out.Bytes())
+}
+
+// emitNintendoExtension writes the 36-byte Nintendo extension block that
+// closes the UserInfo body in real SMM2 captures. The full byte-for-byte
+// mapping to the SMM2User 214-byte file struct (outfit_flags, endless high
+// scores, multiplayer/maker points, equipped clothing, clothing-unlock
+// matrix, course stats, story-mode counters) is TODO — for now we emit
+// all zeros for empty profiles (verified against beertest capture: trailing
+// is exactly 36 zero bytes) and the 4 byte profile_value + flag pattern
+// for registered profiles (verified against Beer2 capture: profile_value
+// at offset 2-3 + 0x00001FAA + 0x09000000 + 12 zeros + flag pattern).
+//
+// Mapping per the SMM2User struct (per Felipe's reverse engineering):
+//   offset 0-3   : 4 bytes (varía por perfil, ej. 0x25450000 para Beer2)
+//   offset 4-7   : 4 bytes 0x00001FAA (constante en todas las capturas)
+//   offset 8-11  : 4 bytes 0x09000000 (constante en todas las capturas)
+//   offset 12-23 : 12 bytes ceros
+//   offset 24-35 : 12 bytes (varía: profile flags + counts)
+//
+// TODO once we get a real SMM2User file dump, map each field precisely.
+func emitNintendoExtension(out *nex.StreamOut, f userInfoFields) {
+	if f.Trailing != nil {
+		out.Write(f.Trailing)
+		return
+	}
+	// Default for empty/unknown profiles: 36 bytes of zeros.
+	out.Write(make([]byte, 36))
 }
 
 // syntheticUserInfoFromProfile builds a COMPLETE version-0 UserInfo for get_users(48)
