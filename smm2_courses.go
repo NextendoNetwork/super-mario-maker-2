@@ -217,11 +217,41 @@ func idsToCourses(ids []uint64) []*courseMeta {
 	return out
 }
 
-// buildCourseInfo serialises a courseMeta to a framed CourseInfo per the
-// NintendoClients spec. The frameStruct wrapper matches what every other
-// complex return type in this server uses (so 70/73 receive [u32 frame][body]).
-func buildCourseInfo(s *nex.Settings, m *courseMeta) []byte {
-	code := courseCode(m.DataID)
+// courseInfoFields is the resolved shape for one course's CourseInfo payload,
+// after applying defaults (name fallback, tag extraction, difficulty clamp)
+// and URL resolution (thumb1, thumb2). Splits "what to put in" (resolve)
+// from "how to put it on the wire" (write). The 5 m.* fields used in
+// writeCourseInfo (DataID/OwnerPID/Description/GameStyle/CourseTheme/CreatedAt/
+// CommentCounts) are read directly from m at emit time because they're either
+// 1:1 pass-throughs or have no transformation.
+type courseInfoFields struct {
+	code       string
+	name       string
+	tag1       uint8
+	tag2       uint8
+	difficulty uint8
+	thumb1URL  string
+	thumb2URL  string
+}
+
+// resolveCourseInfoFields returns the filled-in field set for one course.
+// Tags: only the first two matter (the wire shape is fixed at 2 u8s).
+// Name: falls back to "Untitled" if empty or the literal "course" placeholder.
+// Difficulty: CLAMPED to the documented 0-3 range (CourseDifficulty: EASY=0,
+// STANDARD=1, EXPERT=2, SUPER_EXPERT=3). catalog.json has a few entries with
+// difficulty=5 from an earlier, still-unfixed parse bug in
+// parsePreparePostCourseParam — an out-of-range enum value here is a real,
+// concrete candidate for a client-side crash mid-render (array index out of
+// bounds against a 4-entry difficulty-icon/name table), matching exactly what
+// was reported: spinner shows, then "communication error" with NOTHING
+// rendered — client fails mid-render, not mid-network-call.
+// Thumbnail URLs: ALWAYS built (never empty). The client uses them to drive
+// the next HTTP GET even when the on-disk blob is missing (HTTP handler
+// returns 404, client shows a placeholder). Gating on sz>0 used to leave the
+// URL empty, which made the client skip the download entirely. Path matches
+// the SMM2 thumbnail URL scheme; thumbnailHandler in smm2_storage.go serves
+// both from smm2_objects/courses/<id>/thumb{1,2}.jpg.
+func resolveCourseInfoFields(m *courseMeta) courseInfoFields {
 	name := m.Name
 	if name == "" || name == "course" {
 		name = "Untitled"
@@ -233,75 +263,86 @@ func buildCourseInfo(s *nex.Settings, m *courseMeta) []byte {
 	if len(m.Tags) > 1 {
 		tag2 = m.Tags[1]
 	}
-
-	// Thumbnail URLs (empty if the file isn't on disk — SMM2 treats that as
-	// "no thumbnail" rather than failing the whole CourseInfo). URL shape must match the
-	// key produced by smm2PrepareRelationUpload (now "<dataID>/<relType>") so the GET
-	// path's parseRelationKey recognises it and lands on the same relationPath() that
-	// wrote it. An earlier version returned "/relation/thumb1_<id>" — which matched the
-	// upload's old key but, because the upload has since been moved to <id>/<relType>,
-	// would have hit a 404 + octet-stream even after a successful upload.
-	thumb1URL := ""
-	thumb2URL := ""
-	// Build thumb URLs unconditionally — the client uses them to drive the next HTTP GET,
-	// even when the on-disk blob is missing (in which case the HTTP handler returns 404
-	// and the client shows a placeholder). Gating on sz>0 used to leave the URL empty,
-	// which made the client skip the download entirely. The path matches the SMM2
-	// thumbnail URL scheme ("/one_screen_thumbnail/<id>" and "/entire_thumbnail/<id>");
-	// thumbnailHandler in smm2_storage.go serves both from
-	// smm2_objects/courses/<id>/thumb{1,2}.jpg.
-	thumb1URL, thumb2URL = thumbURLsForCourse(m)
-
-	out := nex.NewStreamOut(s)
-	out.U64(m.DataID)                  // data_id
-	out.String(code)                   // code  ← THE COURSE ID SMM2 DISPLAYS
-	out.PID(m.OwnerPID)                // owner_id
-	out.String(name)                   // name
-	out.String(m.Description)          // description
-	out.U8(m.GameStyle)                // game_style (0-based: 0=SMB1, 1=SMB3, 2=SMW, 3=NSMBU)
-	out.U8(m.CourseTheme)              // course_theme (0-based per style)
-	out.DateTime(unixToDateTime(m.CreatedAt)) // upload_time
-	// difficulty: CLAMPED to the documented 0-3 range (CourseDifficulty: EASY=0,
-	// STANDARD=1, EXPERT=2, SUPER_EXPERT=3). catalog.json has several real entries
-	// with difficulty=5 (from an earlier, still-unfixed parse bug in
-	// parsePreparePostCourseParam) — an out-of-range enum value here is a real,
-	// concrete candidate for a client-side crash while rendering the list (array
-	// index out of bounds against a 4-entry difficulty-icon/name table), matching
-	// exactly what was reported: spinner shows, then "communication error" with
-	// NOTHING ever rendered — consistent with the client failing mid-render rather
-	// than mid-network-call.
 	difficulty := m.Difficulty
 	if difficulty > 3 {
 		difficulty = 0
 	}
-	out.U8(difficulty)                 // difficulty (0=Easy, 1=Normal, 2=Expert, 3=SuperExpert)
-	out.U8(tag1)                       // tag1
-	out.U8(tag2)                       // tag2
-	out.U8(0)                          // unk1
-	out.U32(0)                         // clear_condition
-	out.U16(0)                         // clear_condition_magnitude
-	out.U16(0)                         // unk2
-	// unk3: TESTED AND REVERTED. Tried embedding the small entire_thumbnail (thumb2)
-	// directly here as a hypothesis for how the client shows thumbnails without ever
-	// issuing an HTTP GET for one_screen/entire_thumbnail (confirmed real JPEG bytes
-	// landed in the wire — response size correctly grew to ~42KB for 15 courses — but
-	// thumbnails still didn't render). Reverted to empty: no confirmed benefit, and it
-	// was pure overhead (up to ~40KB per course) otherwise. This is now a known
-	// limitation with no further untested, well-reasoned hypothesis — see memory notes.
-	out.QBuffer(nil)
-	writeU8U32Map(out, buildCoursePlayStatsMap(m))  // play_stats (PlayStatsKeys)
-	writeU8U32Map(out, buildCourseRatingsMap(m))     // ratings (slot 0=like,1=heart,2=boo)
-	writeU8U32Map(out, nil)            // unk4
-	writeCourseTimeStats(out, m)       // time_stats (substruct; from m.FirstCompletionPID etc.)
-	writeU8U32Map(out, m.CommentCounts) // comment_stats (per slot; empty if no comments)
-	out.U8(0)                          // unk9
-	out.U8(0)                          // unk10
-	out.U8(0)                          // unk11
-	out.U8(0)                          // unk12
-	writeRelationObjectReqGetInfo(out, thumb1URL, relationSizeOnDisk(m.DataID, 1)) // one_screen_thumbnail
-	writeRelationObjectReqGetInfo(out, thumb2URL, relationSizeOnDisk(m.DataID, 2)) // entire_thumbnail
+	thumb1URL, thumb2URL := thumbURLsForCourse(m)
+	return courseInfoFields{
+		code:       courseCode(m.DataID),
+		name:       name,
+		tag1:       tag1,
+		tag2:       tag2,
+		difficulty: difficulty,
+		thumb1URL:  thumb1URL,
+		thumb2URL:  thumb2URL,
+	}
+}
 
+// writeCourseInfo emits the framed CourseInfo wire format from resolved
+// fields. 24 wire fields, grouped:
+//
+//	identity (4)   — data_id, code, owner_pid, name
+//	meta (4)       — description, game_style, course_theme, upload_time
+//	difficulty (1) — clamped 0-3
+//	tags (2)       — tag1, tag2
+//	unk (4)        — unk1, clear_condition, clear_condition_magnitude, unk2
+//	unk3 (1)       — QBuffer (empty; tested + reverted, see below)
+//	stats (3)      — play_stats, ratings, unk4
+//	time (1)       — time_stats (substruct via writeCourseTimeStats)
+//	comments (1)   — comment_stats
+//	unk (4)        — unk9, unk10, unk11, unk12
+//	thumbnails (2) — one_screen_thumbnail, entire_thumbnail
+//
+// Order, types, and framing match the NintendoClients CourseInfo shape
+// exactly. Substructs (writeCourseTimeStats, writeRelationObjectReqGetInfo)
+// handle their own [u8 ver][u32 len] framing.
+//
+// unk3 note: TESTED AND REVERTED. Tried embedding the small entire_thumbnail
+// (thumb2) directly here as a hypothesis for how the client shows thumbnails
+// without ever issuing an HTTP GET for one_screen/entire_thumbnail (real JPEG
+// bytes landed in the wire — response size grew to ~42KB for 15 courses —
+// but thumbnails still didn't render). Reverted to empty: no confirmed
+// benefit, and it was pure overhead (up to ~40KB per course) otherwise.
+// Known limitation with no further untested, well-reasoned hypothesis.
+func writeCourseInfo(s *nex.Settings, m *courseMeta, f courseInfoFields) []byte {
+	out := nex.NewStreamOut(s)
+	out.U64(m.DataID)                          // data_id
+	out.String(f.code)                         // code  ← THE COURSE ID SMM2 DISPLAYS
+	out.PID(m.OwnerPID)                        // owner_id
+	out.String(f.name)                         // name
+	out.String(m.Description)                  // description
+	out.U8(m.GameStyle)                        // game_style
+	out.U8(m.CourseTheme)                      // course_theme
+	out.DateTime(unixToDateTime(m.CreatedAt))  // upload_time
+	out.U8(f.difficulty)                       // difficulty (0=Easy, 1=Normal, 2=Expert, 3=SuperExpert)
+	out.U8(f.tag1)                             // tag1
+	out.U8(f.tag2)                             // tag2
+	out.U8(0)                                  // unk1
+	out.U32(0)                                 // clear_condition
+	out.U16(0)                                 // clear_condition_magnitude
+	out.U16(0)                                 // unk2
+	out.QBuffer(nil)                           // unk3 (tested + reverted; see docstring)
+	writeU8U32Map(out, buildCoursePlayStatsMap(m))  // play_stats
+	writeU8U32Map(out, buildCourseRatingsMap(m))     // ratings
+	writeU8U32Map(out, nil)                    // unk4
+	writeCourseTimeStats(out, m)               // time_stats
+	writeU8U32Map(out, m.CommentCounts)        // comment_stats
+	out.U8(0)                                  // unk9
+	out.U8(0)                                  // unk10
+	out.U8(0)                                  // unk11
+	out.U8(0)                                  // unk12
+	writeRelationObjectReqGetInfo(out, f.thumb1URL, relationSizeOnDisk(m.DataID, 1)) // one_screen_thumbnail
+	writeRelationObjectReqGetInfo(out, f.thumb2URL, relationSizeOnDisk(m.DataID, 2)) // entire_thumbnail
 	return frameStruct(s, 0, out.Bytes())
+}
+
+// buildCourseInfo serialises a courseMeta to a framed CourseInfo per the
+// NintendoClients spec. The frameStruct wrapper matches what every other
+// complex return type in this server uses (so 70/73 receive [u32 frame][body]).
+// Resolves fields, then writes the wire envelope.
+func buildCourseInfo(s *nex.Settings, m *courseMeta) []byte {
+	return writeCourseInfo(s, m, resolveCourseInfoFields(m))
 }
 
 // writeCourseInfoListResponse emits the canonical `list<CourseInfo> + bool
