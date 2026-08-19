@@ -812,60 +812,96 @@ func buildMakerStatsMap(m makerStats) map[uint8]uint32 {
 	return map[uint8]uint32{0: m.LikesReceived}
 }
 
-// syntheticUserInfoFromProfile builds a COMPLETE version-0 UserInfo for get_users(48)
-// from a stored registration — every documented field present, populated from the
-// profile's tracked stats where we know the wire encoding, and explicitly empty
-// (not MISSING) where we don't.
-func syntheticUserInfoFromProfile(s *nex.Settings, pid uint64, r *registeredProfile) []byte {
-	name := pseudoOr(pid)
-	var unk1, mii []byte
-	var country string
-	var region uint8
-	var play playStats
-	var maker makerStats
-	var multi multiplayerStats
-	var endless map[uint8]uint32
-	var badges []badgeInfo
-	var unk7, unk8, unk9 map[uint8]uint32
-	if r != nil {
-		if r.Username != "" {
-			name = r.Username
-		}
-		unk1 = r.unk1Bytes()
-		mii = r.miiBytes()
-		country = r.CountryCode
-		region = r.RegionID
-		play = r.Play
-		maker = r.Maker
-		multi = r.Multiplayer
-		endless = r.EndlessHighScores
-		badges = r.Badges
-		unk7 = r.Unk7
-		unk8 = r.Unk8
-		unk9 = r.Unk9
-	}
+// userInfoFields is the resolved shape for one PID's UserInfo payload, after
+// applying defaults from pseudoOr() and overrides from a registered profile
+// (if any). The "empty" defaults match what we want a stranger-PID to look
+// like: name = pseudoOr(pid), no unk1/mii, empty country, region 0, zero stats.
+// Splits "what to put in" (resolve) from "how to put it on the wire" (write).
+type userInfoFields struct {
+	name    string
+	unk1    []byte
+	mii     []byte
+	country string
+	region  uint8
+	play    playStats
+	maker   makerStats
+	multi   multiplayerStats
+	endless map[uint8]uint32
+	badges  []badgeInfo
+	unk7    map[uint8]uint32
+	unk8    map[uint8]uint32
+	unk9    map[uint8]uint32
+}
 
+// resolveUserInfoFields returns the filled-in field set for one PID from a
+// registered profile. If r is nil, returns the empty defaults. Each field is
+// a direct copy of the profile's stored value — no transformation. Adding
+// a new profile field is a 2-line change here + one wire field in writeUserInfo.
+func resolveUserInfoFields(pid uint64, r *registeredProfile) userInfoFields {
+	f := userInfoFields{name: pseudoOr(pid)}
+	if r == nil {
+		return f
+	}
+	if r.Username != "" {
+		f.name = r.Username
+	}
+	f.unk1 = r.unk1Bytes()
+	f.mii = r.miiBytes()
+	f.country = r.CountryCode
+	f.region = r.RegionID
+	f.play = r.Play
+	f.maker = r.Maker
+	f.multi = r.Multiplayer
+	f.endless = r.EndlessHighScores
+	f.badges = r.Badges
+	f.unk7 = r.Unk7
+	f.unk8 = r.Unk8
+	f.unk9 = r.Unk9
+	return f
+}
+
+// writeUserInfo emits the full version-0 UserInfo wire format from resolved
+// fields. 18 fields, grouped:
+//
+//	header (7)  — PID, code, name, unk1, mii, country, region
+//	last_active (1)
+//	3 unknown bools (3)
+//	5 stat maps  (5) — play, maker, endless, multi, unk7
+//	badge list   (1)
+//	3 trailing unknown maps (3) — unk8, unk9 + frame
+//
+// Order, types, and framing match the kinnay/nintendoclients UserInfo shape
+// exactly. Helpers (writeU8U32Map, writeBoolFalse3, writeDateTimeNow,
+// writeBadgeInfoList) keep this to one wire call per logical field.
+func writeUserInfo(s *nex.Settings, pid uint64, f userInfoFields) []byte {
 	out := nex.NewStreamOut(s)
 	out.PID(pid)
 	out.String(makerCode(pid))
-	out.String(name)
-	out.Write(frameStruct(s, 0, unk1)) // unk1: UnknownStruct1 (pose/hat/shirt/pants), real if captured
-	out.QBuffer(mii)                   // unk2: Mii bytes, real if registered
-	out.String(country)
-	out.U8(region)
-	out.DateTime(nex.NowDateTime().Value())             // last_active
-	out.Bool(false)                                     // unk3
-	out.Bool(false)                                     // unk4
-	out.Bool(false)                                     // unk5
-	writeU8U32Map(out, buildPlayStatsMap(play))         // play_stats (PlayStatsKeys)
-	writeU8U32Map(out, buildMakerStatsMap(maker))       // maker_stats (only verified keys; see comment)
-	writeU8U32Map(out, endless)                         // endless_challenge_high_scores
-	writeU8U32Map(out, buildMultiplayerStatsMap(multi)) // multiplayer_stats (MultiplayerStatsKeys)
-	writeU8U32Map(out, unk7)                            // unk7
-	writeBadgeInfoList(out, badges)                     // badges: List<BadgeInfo>
-	writeU8U32Map(out, unk8)                            // unk8
-	writeU8U32Map(out, unk9)                            // unk9
+	out.String(f.name)
+	out.Write(frameStruct(s, 0, f.unk1)) // unk1: UnknownStruct1 (pose/hat/shirt/pants), real if captured
+	out.QBuffer(f.mii)                    // unk2: Mii bytes, real if registered
+	out.String(f.country)
+	out.U8(f.region)
+	writeDateTimeNow(out)                  // last_active
+	writeBoolFalse3(out)                   // unk3 / unk4 / unk5
+	writeU8U32Map(out, buildPlayStatsMap(f.play))          // play_stats (PlayStatsKeys)
+	writeU8U32Map(out, buildMakerStatsMap(f.maker))        // maker_stats (only verified keys)
+	writeU8U32Map(out, f.endless)                          // endless_challenge_high_scores
+	writeU8U32Map(out, buildMultiplayerStatsMap(f.multi))  // multiplayer_stats (MultiplayerStatsKeys)
+	writeU8U32Map(out, f.unk7)                             // unk7
+	writeBadgeInfoList(out, f.badges)                      // badges: List<BadgeInfo>
+	writeU8U32Map(out, f.unk8)                             // unk8
+	writeU8U32Map(out, f.unk9)                             // unk9
 	return frameStruct(s, 0, out.Bytes())
+}
+
+// syntheticUserInfoFromProfile builds a COMPLETE version-0 UserInfo for get_users(48)
+// from a stored registration — every documented field present, populated from the
+// profile's tracked stats where we know the wire encoding, and explicitly empty
+// (not MISSING) where we don't. Resolves fields from the profile, then writes
+// the wire envelope.
+func syntheticUserInfoFromProfile(s *nex.Settings, pid uint64, r *registeredProfile) []byte {
+	return writeUserInfo(s, pid, resolveUserInfoFields(pid, r))
 }
 
 // writeBadgeInfoList serialises a List<BadgeInfo> per the documented kinnay/
