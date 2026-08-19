@@ -211,6 +211,9 @@ func (p *profileRegistry) load() {
 				p.byPID[r.PID] = r
 			}
 		}
+	} else if os.IsNotExist(err) {
+		// First run (or fresh STORAGE_DIR): materialize an empty profiles.json right away.
+		p.persistLocked()
 	}
 	fmt.Printf("[SMM2 Profiles] %d perfil(es) maker registrado(s) cargado(s) desde disco\n", len(p.byPID))
 }
@@ -220,11 +223,18 @@ func (p *profileRegistry) persistLocked() {
 	for _, r := range p.byPID {
 		list = append(list, r)
 	}
-	if b, err := json.MarshalIndent(list, "", "  "); err == nil {
-		tmp := p.path + ".tmp"
-		if os.WriteFile(tmp, b, 0o644) == nil {
-			_ = os.Rename(tmp, p.path)
-		}
+	b, err := json.MarshalIndent(list, "", "  ")
+	if err != nil {
+		fmt.Printf("[SMM2 Profiles] cannot marshal profiles.json: %v\n", err)
+		return
+	}
+	tmp := p.path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		fmt.Printf("[SMM2 Profiles] cannot write %s: %v\n", tmp, err)
+		return
+	}
+	if err := os.Rename(tmp, p.path); err != nil {
+		fmt.Printf("[SMM2 Profiles] cannot rename %s -> %s: %v\n", tmp, p.path, err)
 	}
 }
 
@@ -232,12 +242,18 @@ func (p *profileRegistry) persistLocked() {
 func (p *profileRegistry) register(pid uint64, username string, miiData, unk1 []byte, regionID uint8, countryCode, pseudoDeviceID string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.byPID[pid] = &registeredProfile{
-		PID: pid, Username: username,
-		MiiDataHex: hex.EncodeToString(miiData), Unk1Hex: hex.EncodeToString(unk1),
-		RegionID: regionID, CountryCode: countryCode, PseudoDeviceID: pseudoDeviceID,
-		RegisteredAt: time.Now().Unix(),
+	r := p.byPID[pid]
+	if r == nil {
+		r = &registeredProfile{PID: pid}
+		p.byPID[pid] = r
 	}
+	r.Username = username
+	r.MiiDataHex = hex.EncodeToString(miiData)
+	r.Unk1Hex = hex.EncodeToString(unk1)
+	r.RegionID = regionID
+	r.CountryCode = countryCode
+	r.PseudoDeviceID = pseudoDeviceID
+	r.RegisteredAt = time.Now().Unix()
 	p.persistLocked()
 }
 
@@ -690,7 +706,7 @@ func (r *registeredProfile) unk1Bytes() []byte {
 //	String countryCode
 //	String pseudoDeviceID
 func parseRegisterUserParam(s *nex.Settings, body []byte) (username string, unk1, miiData []byte, regionID uint8, countryCode, pseudoDeviceID string, ok bool) {
-	parseParamStream(s, body, func(p *nex.StreamIn) bool {
+	_, ok = parseParamStream(s, body, func(p *nex.StreamIn) bool {
 		username = p.String()
 
 		_ = p.U8() // UnknownStruct1 version
@@ -703,7 +719,6 @@ func parseRegisterUserParam(s *nex.Settings, body []byte) (username string, unk1
 		pseudoDeviceID = p.String()
 		return true
 	})
-	ok = true
 	return
 }
 
@@ -838,14 +853,19 @@ type userInfoFields struct {
 // a direct copy of the profile's stored value — no transformation. Adding
 // a new profile field is a 2-line change here + one wire field in writeUserInfo.
 func resolveUserInfoFields(pid uint64, r *registeredProfile) userInfoFields {
-	f := userInfoFields{name: pseudoOr(pid)}
+	f := userInfoFields{
+		name: pseudoOr(pid),
+		unk1: make([]byte, 8), // 8 zero bytes: below this the client aborts avatar creation
+	}
 	if r == nil {
 		return f
 	}
 	if r.Username != "" {
 		f.name = r.Username
 	}
-	f.unk1 = r.unk1Bytes()
+	if len(r.unk1Bytes()) > 0 {
+		f.unk1 = r.unk1Bytes()
+	}
 	f.mii = r.miiBytes()
 	f.country = r.CountryCode
 	f.region = r.RegionID
@@ -924,17 +944,21 @@ func writeBadgeInfoList(out *nex.StreamOut, list []badgeInfo) {
 func syntheticSyncProfileResult(s *nex.Settings, pid uint64, r *registeredProfile) []byte {
 	name := pseudoOr(pid)
 	country := ""
+	unk1 := make([]byte, 8) // 8 zero bytes: below this the client aborts avatar creation
 	if r != nil {
 		if r.Username != "" {
 			name = r.Username
 		}
 		country = r.CountryCode
+		if len(r.unk1Bytes()) > 0 {
+			unk1 = r.unk1Bytes()
+		}
 	}
 	out := nex.NewStreamOut(s)
 	out.PID(pid)
 	out.String(name)
-	out.Write(frameStruct(s, 0, r.unk1Bytes())) // UnknownStruct1: real if we have it
-	out.QBuffer(r.miiBytes())                   // real Mii bytes if registered
+	out.Write(frameStruct(s, 0, unk1)) // UnknownStruct1: real if we have it
+	out.QBuffer(r.miiBytes())          // real Mii bytes if registered
 	out.U8(0)                                   // unknown
 	out.String(country)
 	out.U8(0)       // unknown
