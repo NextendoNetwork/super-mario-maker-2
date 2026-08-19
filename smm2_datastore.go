@@ -609,151 +609,139 @@ func smm2TouchObject(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage 
 // re-fetches that close the loop. The reference (OCW) response is a void
 // ack (0 bytes, success=true).
 //
-// Request body: EXACTLY 51 bytes in both reference captures (verified 18/8 by
-// reading the source capture files directly — the body[0]=version(1) +
-// body[1:5]=substream_len(46) + 46-byte substream, no trailing byte at all;
-// an earlier version of this comment claimed one capture was 52 bytes with a
-// trailing 0x00, that was wrong). Layout, verified field-by-field against both
-// real captures (both play sessions of OCW course 1000003046):
-//
-//	substream (46 bytes):
-//	  u64  course_id                (1000003046, same both times)
-//	  u32  attempt_count?           CONFIRMED VARIES (18/8, controlled test: same
-//	                                 course played twice, once cleared on the first
-//	                                 try (value=1), once with 2 deliberate deaths
-//	                                 added before clearing (value=3) — 2 deaths + 1
-//	                                 successful clear = 3 total tries, matches
-//	                                 exactly). Much stronger candidate for "attempt
-//	                                 count" than the field below ever was.
-//	  u32  playtime_ms              CONFIRMED (18/8, cross-checked against an
-//	                                 on-screen clear-time screenshot for a DIFFERENT
-//	                                 capture: field value 1450 matched the displayed
-//	                                 "00:01.450" exactly): MILLISECONDS, not 60fps
-//	                                 frames as an earlier version of this comment
-//	                                 claimed. Retroactively corrects the two
-//	                                 OCW captures too: 0x6BF6=27638ms=~27.6s and
-//	                                 0x71FF=29183ms=~29.2s (not 7m41s / 8m06s).
-//	  u16  unknown                  (1, both times)
-//	  u32  unknown, NOT death_count (13 in FIVE separate captures now, including a
-//	                                 CONTROLLED test — 18/8: the exact same course
-//	                                 played with 2 deliberately added deaths STILL
-//	                                 showed 13 here, identical to a same-course run
-//	                                 with no added deaths. Confirmed, not just
-//	                                 suspected: this field cannot be a death count.
-//	                                 Kept the "?" naming until we find what it
-//	                                 actually is.
-//	  u64  owner_pid? (=course_id)  (1000003046, both times)
-//	  u32  timestamp?               (0x00200A4C vs 0x0025012A — changes per play)
-//	  u32  unknown                  (256, both times)
-//	  u32  unknown                  (5, both times)
-//	  u32  cleared_flag             (1, both times — last u32 of the body)
-//
-// The two captures give us two data points: playtime + timestamp + the first
-// "unknown" u32 change per play, but course_id/owner_pid/the constant-13
-// field/the last three u32s stay constant — consistent with those being
-// per-course rather than per-play values (or, for the constant-13 field,
-// possibly not gameplay data at all — see its note above).
-//
-// A THIRD, LONGER variant (59 bytes, seen 18/8 from this project's own local
-// test courses 1002 and 1003, not OCW) adds two more fields after the same
-// 10-field prefix above: the course's numeric ID repeated twice as a STRING
-// (e.g. "1002"), with a small 5-byte gap between them (u32=5, u8=1). Real,
-// small local test courses without a proper Nintendo-style alphanumeric code
-// appear to fall back to the numeric ID as a string here — untested whether a
-// real 9-character code (like "PFGYVNN6K") would appear in that same slot for
-// an OCW-style course, since neither of the two 51-byte OCW captures we have
-// include this suffix at all.
-//
-// We only trust the fields the client itself will reuse downstream: the
-// course_id (first u64 of the substream) and the cleared_flag (the LAST u32
-// of the body — fixed position relative to body end, robust to the 1-byte
-// length difference between OCW captures). The cleared_flag decides whether
-// we bump ClearCount or DeathCount in the catalog — both go through the same
-// courses.applyPlayed() / profiles.applyPlayStats() / profiles.applyMakerReceived()
-// pipeline used by m=22 and m=133, so all three post-play paths stay consistent.
-//
-// Owner self-clear detection: we skip the maker-side bump when conn.PID ==
-// course.OwnerPID, matching the same self-play guard m=25 already enforces
-// (so a maker testing their own course doesn't inflate their own stats).
+// The wire shape is documented in detail on parsePostPlayResult (it has to
+// live there because the parser is the only place that reads those bytes).
+// The handler here is now a composition: parse → derive counters → apply
+// (which encapsulates the 6-step side-effect chain) → log → ack.
 func smm2PostPlayResult(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
 	s := conn.Settings
-	var dataID uint64
-	var attempts uint32 // per-session attempt count — see field doc above. Treated as a DELTA
-	// (added to the course/player's running AttemptCount via applyPlayed/applyPlayStats), same
-	// as plays/clears/deaths — NOT an absolute lifetime total. The confirmed value (1 on a
-	// first-try clear, 3 after 2 deaths) is "how many tries THIS session took", so adding it
-	// once per post_play_result call is the correct accumulation, not an overwrite.
-	var playtimeMs uint32 // CONFIRMED milliseconds (see field doc above) — 18/8, now wired to setCourseTimes
-	var cleared uint32    // 0 = died, 1 = cleared (per OCW, the last u32 of the body is the cleared flag)
-	if len(req.Body) >= 5 {
-		defer func() { recover() }() // tolerate any parse error
-		in := nex.NewStreamIn(req.Body, s)
-		_ = in.U8() // outer u8 prefix (some clients send a version byte outside the substream)
-		sub := in.Substream()
-		if sub != nil && sub.Remaining() >= 16 {
-			dataID = sub.U64()
-			attempts = sub.U32()   // the field confirmed via the controlled 2-death test (see doc above)
-			playtimeMs = sub.U32() // confirmed via an on-screen "00:01.450" screenshot match
-		} else if sub != nil && sub.Remaining() >= 12 {
-			dataID = sub.U64()
-			attempts = sub.U32()
-		} else if sub != nil && sub.Remaining() >= 8 {
-			dataID = sub.U64()
-		}
-	}
-	// Cleared flag is the LAST u32 of the body. Two OCW reference captures
-	// (51 and 52 bytes) both have it = 1 (cleared), so the 1-byte length
-	// difference doesn't move the field — it lives at body[len-4:len-0].
-	if len(req.Body) >= 4 {
-		cleared = uint32(req.Body[len(req.Body)-4]) |
-			uint32(req.Body[len(req.Body)-3])<<8 |
-			uint32(req.Body[len(req.Body)-2])<<16 |
-			uint32(req.Body[len(req.Body)-1])<<24
-	}
+	f := parsePostPlayResult(s, req.Body)
 	// Decide which counter to bump. Cleared → +1 play +1 clear. Died → +1
 	// play +1 death. Either way, +1 play always (mirrors m=22 / m=133).
 	plays, clears, deaths := uint32(1), uint32(0), uint32(0)
-	if cleared != 0 {
+	if f.cleared != 0 {
 		clears = 1
 	} else {
 		deaths = 1
 	}
-	if dataID != 0 {
-		courses.applyPlayed(dataID, plays, clears, attempts, deaths)
-		profiles.applyPlayStats(conn.PID, plays, clears, attempts, deaths)
-		// Per-user relation: track that this PID has played this course
-		// AND (if cleared) was the first clearer. Idempotent on both.
-		profiles.recordPlay(conn.PID, dataID)
-		if cleared != 0 {
-			profiles.recordClear(conn.PID, dataID)
-			profiles.recordFirstClear(conn.PID, dataID)
-			// World-record time: now that playtimeMs is confirmed real (not a
-			// placeholder), record it — setCourseTimes compares against the
-			// current holder and only updates if this run is faster (see its
-			// own doc for the "first ever clear" vs "actually faster" logic).
-			if playtimeMs > 0 {
-				courses.setCourseTimes(dataID, conn.PID, playtimeMs)
-			}
-		}
-		if m := courses.get(dataID); m != nil && m.OwnerPID != conn.PID {
-			profiles.applyMakerReceived(m.OwnerPID, plays, clears, attempts, deaths)
-		}
-	}
+	applyPostPlayResult(conn.PID, f.dataID, plays, clears, f.attempts, deaths, f.playtimeMs)
 	verb := "DIED"
-	if cleared != 0 {
+	if f.cleared != 0 {
 		verb = "CLEARED"
 	}
 	fmt.Printf("[SMM2 DataStore] post_play_result(96) pid=%d data_id=%d cleared=0x%x attempts=%d -> +%d play +%d clear +%d death +%d attempt (%s) + player%s\n",
-		conn.PID, dataID, cleared, attempts, plays, clears, deaths, attempts, verb,
-		func() string {
-			if dataID != 0 {
-				if m := courses.get(dataID); m != nil && m.OwnerPID == conn.PID {
-					return " (self-play, maker stats skipped)"
-				}
-			}
-			return " + maker"
-		}())
+		conn.PID, f.dataID, f.cleared, f.attempts, plays, clears, deaths, f.attempts, verb,
+		describePostPlayResult(conn.PID, f.dataID))
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
+}
+
+// postPlayFields is the parsed post_play_result(96) request shape: dataID,
+// attempts delta, playtimeMs (only set on clear, confirmed via OCW screenshot),
+// and the cleared flag (0 = died, 1 = cleared). All four fields default to 0
+// on parse failure — the prior behaviour was "silently skip all stats updates
+// on malformed body" via the recover + remaining-bytes guards.
+type postPlayFields struct {
+	dataID     uint64
+	attempts   uint32
+	playtimeMs uint32
+	cleared    uint32
+}
+
+// parsePostPlayResult decodes the post_play_result(96) body. Two OCW reference
+// captures are 51 and 52 bytes long (1-byte difference), so the parse tolerates
+// three shorter shapes: 8-byte minimum (dataID only), 12-byte (dataID +
+// attempts), 16-byte (full). The cleared flag is the LAST u32 of the body
+// regardless of total length — confirmed in both 51/52-byte captures.
+//
+// Wire shape per kinnay/NintendoClients' captured DataStoreClientSMM2
+// post_play_result:
+//
+//	[u8 outer=0][u32 sub_len][u64 data_id][u32 attempts][u32 playtimeMs][u32 cleared_flag]
+//
+// attempts is a per-session DELTA (1 on a first-try clear, 3 after 2 deaths
+// per the controlled test), not an absolute lifetime total. playtimeMs is
+// milliseconds (confirmed via an on-screen "00:01.450" screenshot match) and
+// is only set when the player actually finished (cleared) the course.
+func parsePostPlayResult(s *nex.Settings, body []byte) postPlayFields {
+	var f postPlayFields
+	if len(body) < 5 {
+		return f
+	}
+	defer func() { recover() }() // tolerate any parse error
+	in := nex.NewStreamIn(body, s)
+	_ = in.U8() // outer u8 prefix (some clients send a version byte outside the substream)
+	sub := in.Substream()
+	if sub != nil && sub.Remaining() >= 16 {
+		f.dataID = sub.U64()
+		f.attempts = sub.U32()   // delta, see field doc above
+		f.playtimeMs = sub.U32() // confirmed via on-screen "00:01.450" screenshot match
+	} else if sub != nil && sub.Remaining() >= 12 {
+		f.dataID = sub.U64()
+		f.attempts = sub.U32()
+	} else if sub != nil && sub.Remaining() >= 8 {
+		f.dataID = sub.U64()
+	}
+	// Cleared flag is the LAST u32 of the body. Two OCW reference captures
+	// (51 and 52 bytes) both have it = 1 (cleared), so the 1-byte length
+	// difference doesn't move the field — it lives at body[len-4:len-0].
+	if len(body) >= 4 {
+		f.cleared = uint32(body[len(body)-4]) |
+			uint32(body[len(body)-3])<<8 |
+			uint32(body[len(body)-2])<<16 |
+			uint32(body[len(body)-1])<<24
+	}
+	return f
+}
+
+// applyPostPlayResult applies the post_play_result(96) side effects:
+//   - courses.applyPlayed: bumps PlayCount/ClearCount/AttemptCount/DeathCount
+//   - profiles.applyPlayStats: same on the player's running stats
+//   - profiles.recordPlay: track that this PID played this course
+//   - profiles.recordClear + recordFirstClear (if cleared): same for clears
+//   - courses.setCourseTimes (if cleared + playtimeMs > 0): world-record update
+//   - profiles.applyMakerReceived: bump the owner's MakerStats (if not self-play)
+//
+// Owner self-clear detection: we skip the maker-side bump when connPID ==
+// course.OwnerPID, matching the same self-play guard m=25 enforces (so a
+// maker testing their own course doesn't inflate their own stats). dataID=0
+// is a no-op (parse failure, or the boot/tutorial fetch) — preserves the
+// prior "silently skip on malformed body" behaviour.
+func applyPostPlayResult(connPID, dataID uint64, plays, clears, attempts, deaths, playtimeMs uint32) {
+	if dataID == 0 {
+		return
+	}
+	courses.applyPlayed(dataID, plays, clears, attempts, deaths)
+	profiles.applyPlayStats(connPID, plays, clears, attempts, deaths)
+	// Per-user relation: track that this PID has played this course
+	// AND (if cleared) was the first clearer. Idempotent on both.
+	profiles.recordPlay(connPID, dataID)
+	if clears > 0 {
+		profiles.recordClear(connPID, dataID)
+		profiles.recordFirstClear(connPID, dataID)
+		// World-record time: now that playtimeMs is confirmed real (not a
+		// placeholder), record it — setCourseTimes compares against the
+		// current holder and only updates if this run is faster (see its
+		// own doc for the "first ever clear" vs "actually faster" logic).
+		if playtimeMs > 0 {
+			courses.setCourseTimes(dataID, connPID, playtimeMs)
+		}
+	}
+	if m := courses.get(dataID); m != nil && m.OwnerPID != connPID {
+		profiles.applyMakerReceived(m.OwnerPID, plays, clears, attempts, deaths)
+	}
+}
+
+// describePostPlayResult returns the trailing log fragment for the post_play_result
+// log line. self-play (conn.PID == course.OwnerPID) skips the maker-side stat
+// bump and is called out in the log; everything else logs " + maker".
+func describePostPlayResult(connPID, dataID uint64) string {
+	if dataID == 0 {
+		return ""
+	}
+	if m := courses.get(dataID); m != nil && m.OwnerPID == connPID {
+		return " (self-play, maker stats skipped)"
+	}
+	return " + maker"
 }
 
 // smm2PlayEvent (104) — UNDOCUMENTED in kinnay/NintendoClients. Called by
