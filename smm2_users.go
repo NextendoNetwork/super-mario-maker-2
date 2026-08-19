@@ -943,6 +943,44 @@ func syntheticSyncProfileResult(s *nex.Settings, pid uint64, r *registeredProfil
 	return frameStruct(s, 0, out.Bytes())
 }
 
+// lookupProfileForGetUsers resolves a single requested pid to (profile, lookupPID).
+// When exactly one pid is requested and the lookup misses, also tries connPID —
+// the server stored the registration under the hashed anonymous identity
+// resolveUser derived for it (per main.go), which is often different from the
+// raw pid the CLIENT asks with (e.g. a test username like "51966"). Returning
+// (nil, pid) on a complete miss tells the caller to emit the empty-UserInfo
+// placeholder.
+func lookupProfileForGetUsers(pid uint64, pids []uint64, connPID uint64) (*registeredProfile, uint64) {
+	r := profiles.get(pid)
+	if r != nil {
+		return r, pid
+	}
+	if len(pids) == 1 && pid != connPID {
+		if r2 := profiles.get(connPID); r2 != nil {
+			return r2, connPID
+		}
+	}
+	return nil, pid
+}
+
+// writeUserInfoListWithResultsResponse emits the list<UserInfo> + list<u32 result>
+// envelope used by get_users(48). users is the pre-built UserInfo bytes (one
+// per entry). result is currently 0 for every entry — the server doesn't track
+// per-user "result" codes yet (confirmed via measured_live.txt: the result
+// bytes are always 00 00 00 00 in real traffic).
+func writeUserInfoListWithResultsResponse(s *nex.Settings, users [][]byte) []byte {
+	out := nex.NewStreamOut(s)
+	out.U32(uint32(len(users)))
+	for _, u := range users {
+		out.Write(u)
+	}
+	out.U32(uint32(len(users)))
+	for range users {
+		out.Write([]byte{0, 0, 0, 0})
+	}
+	return out.Bytes()
+}
+
 // smm2GetUsersFromProfiles answers get_users(48) using the registered-profile store.
 //
 // The requested pid doesn't always match conn.PID: for a username outside the
@@ -960,15 +998,9 @@ func smm2GetUsersFromProfiles(conn *nex.Connection, req *nex.RMCMessage) *nex.RM
 	pids := parseGetUsersPIDs(conn, req)
 	option := parseGetUsersOption(conn, req)
 
-	var users [][]byte
+	users := make([][]byte, 0, len(pids))
 	for _, pid := range pids {
-		r := profiles.get(pid)
-		lookupPID := pid
-		if r == nil && len(pids) == 1 && pid != conn.PID {
-			if r2 := profiles.get(conn.PID); r2 != nil {
-				r, lookupPID = r2, conn.PID
-			}
-		}
+		r, lookupPID := lookupProfileForGetUsers(pid, pids, conn.PID)
 		if r != nil {
 			users = append(users, syntheticUserInfoFromProfile(s, lookupPID, r))
 		} else {
@@ -983,15 +1015,6 @@ func smm2GetUsersFromProfiles(conn *nex.Connection, req *nex.RMCMessage) *nex.RM
 		}
 	}
 
-	out := nex.NewStreamOut(s)
-	out.U32(uint32(len(users)))
-	for _, u := range users {
-		out.Write(u)
-	}
-	out.U32(uint32(len(users)))
-	for range users {
-		out.Write([]byte{0, 0, 0, 0})
-	}
 	fmt.Printf("[SMM2 DataStore] get_users(48) opt=%#x -> %d/%d perfil(es) registrado(s) encontrado(s)\n", option, len(users), len(pids))
-	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, writeUserInfoListWithResultsResponse(s, users))
 }
