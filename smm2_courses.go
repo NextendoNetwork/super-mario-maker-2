@@ -979,39 +979,56 @@ func smm2RateObject(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
 		profiles.recordRate(conn.PID, dataID, slot)
 	}
 
-	// Aggregate we return to the client. The kinnay doc says
-	// (total_value, count, initial_value) — we approximate total_value as
-	// the current count (each rater contributes +1 to the aggregate) and
-	// count as the count of votes seen. initial_value is whatever we first
-	// stored for the slot, or 0 if the rate was 0 (which we ignored above).
-	m := courses.get(dataID)
-	count := uint32(0)
-	if m != nil {
-		switch slot {
-		case 0:
-			count = m.LikeCount
-		case 1:
-			count = m.HeartCount
-		case 2:
-			count = m.BoosCount
-		}
+	agg := computeRatingAggregate(courses.get(dataID), slot)
+	fmt.Printf("[SMM2 Courses] rate_object(15) pid=%d data_id=%d slot=%d value=%d -> count=%d initial=%d (owner=%d)\n",
+		conn.PID, dataID, slot, ratingValue, agg.count, agg.initial, ownerPID)
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, writeRatingAggregateResponse(s, agg))
+}
+
+// ratingAggregate is the (count, initial) pair we return to the client after
+// applying a rate_object(15) call. count is the slot's current total; initial
+// is the first value we ever stored for that slot (or 0).
+type ratingAggregate struct {
+	count   uint32
+	initial int64
+}
+
+// computeRatingAggregate returns the post-rating count + initial value for
+// one slot. count comes from m's per-slot counter; initial from m.RatingInitial
+// (a map populated by recordRating on first-write). Returns zeros for a nil
+// course — preserves the prior "course not found" silent default.
+func computeRatingAggregate(m *courseMeta, slot uint8) ratingAggregate {
+	if m == nil {
+		return ratingAggregate{}
+	}
+	var count uint32
+	switch slot {
+	case 0:
+		count = m.LikeCount
+	case 1:
+		count = m.HeartCount
+	case 2:
+		count = m.BoosCount
 	}
 	initial := int64(0)
-	if m != nil && m.RatingInitial != nil {
+	if m.RatingInitial != nil {
 		if v, has := m.RatingInitial[slot]; has {
 			initial = v
 		}
 	}
+	return ratingAggregate{count: count, initial: initial}
+}
 
+// writeRatingAggregateResponse emits the (total_value, count, initial_value)
+// triple the kinnay doc says rate_object(15) returns. total_value is
+// approximated as count (each rater contributes +1 in our model); count is
+// the rater total; initial_value is the first-seen rating for this slot.
+func writeRatingAggregateResponse(s *nex.Settings, agg ratingAggregate) []byte {
 	out := nex.NewStreamOut(s)
-	out.S64(int64(count)) // total_value: sum approximation
-	out.U32(count)        // count: # of raters (one per call here)
-	out.S64(initial)      // initial_value: first-seen rating for this slot
-	resp := frameStruct(s, 0, out.Bytes())
-
-	fmt.Printf("[SMM2 Courses] rate_object(15) pid=%d data_id=%d slot=%d value=%d -> count=%d initial=%d (owner=%d)\n",
-		conn.PID, dataID, slot, ratingValue, count, initial, ownerPID)
-	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, resp)
+	out.S64(int64(agg.count)) // total_value: sum approximation
+	out.U32(agg.count)        // count: # of raters (one per call here)
+	out.S64(agg.initial)      // initial_value: first-seen rating for this slot
+	return frameStruct(s, 0, out.Bytes())
 }
 
 // parseRateObjectParam decodes the rate_object(15) request body per
