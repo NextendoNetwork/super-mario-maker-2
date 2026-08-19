@@ -38,6 +38,23 @@ func writeKeyValueList(out *nex.StreamOut, kv map[string]string) {
 	}
 }
 
+// writeDataStoreReqPostInfo emits the framed DataStoreReqPostInfo response
+// used by m=24 (prepare_post_object) and m=66 (prepare_post_object_course).
+// Shape per kinnay/NintendoClients: data_id u64, url string, headers
+// list<KV>, form list<KV>, root_ca_cert buffer. We don't need any KV pairs
+// for our own object store — the client PUTs the blob directly and we
+// route by URL path. The frameStruct wrapper matches every other complex
+// return type in this server.
+func writeDataStoreReqPostInfo(s *nex.Settings, dataID uint64, url string) []byte {
+	body := nex.NewStreamOut(s)
+	body.U64(dataID)           // data_id
+	body.String(url)           // url
+	writeKeyValueList(body, nil) // headers: none required
+	writeKeyValueList(body, nil) // form: none (simple PUT, not multipart)
+	body.Buffer(courses.rootCA)  // root_ca_cert (empty on emulator; Nextendo CA in prod)
+	return frameStruct(s, 0, body.Bytes())
+}
+
 // fallbackNEXToken is the fixed Ryujinx-Nextendo dev token. Used when
 // conn.NEXToken is empty (Ryujinx doesn't send the NEX header).
 const fallbackNEXToken = "4If9rL9JRLMmEvD30GAxDl"
@@ -95,17 +112,9 @@ func smm2PreparePostObjectCourse(conn *nex.Connection, req *nex.RMCMessage) *nex
 	}
 	url := fmt.Sprintf("%s/object/%d", storageURL, id)
 
-	body := nex.NewStreamOut(s)
-	body.U64(id)
-	body.String(url)
-	writeKeyValueList(body, nil) // headers: none needed
-	writeKeyValueList(body, nil) // form: none needed — objectHandler does a plain PUT
-	body.Buffer(courses.rootCA)
-	resp := frameStruct(s, 0, body.Bytes())
-
 	fmt.Printf("[SMM2 Storage] PreparePostObjectCourse(66) pid=%d -> data_id=%d name=%q style=%d theme=%d diff=%d\n",
 		conn.PID, id, name, gameStyle, courseTheme, difficulty)
-	return nex.NewRMCSuccess(s, 0x73, 66, req.CallID, resp)
+	return nex.NewRMCSuccess(s, 0x73, 66, req.CallID, writeDataStoreReqPostInfo(s, id, url))
 }
 
 // parsePreparePostCourseParam decodes the PreparePostCourseParam body from method 66.
