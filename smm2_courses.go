@@ -306,14 +306,21 @@ func buildCourseInfo(s *nex.Settings, m *courseMeta) []byte {
 
 // writeCourseInfoListResponse emits the canonical `list<CourseInfo> + bool
 // result` envelope used by every search_courses_* method. nil / not-Ready
-// courses are silently skipped. result=true unless the caller passes a
-// custom `more` (e.g. for a paginated response).
+// courses are silently skipped. result=true unless the caller needs
+// the inverted "has more" semantic — use the WithResult variant.
 //
 // This is the course-side mirror of writeUserInfoListResponse in
 // smm2_datastore.go. All 9 search_courses_* handlers can compose this
-// instead of inlining the U32+for-loop+Bool pattern (Phase 2 of the
-// refactor will switch them over).
+// instead of inlining the U32+for-loop+Bool pattern.
 func writeCourseInfoListResponse(s *nex.Settings, list []*courseMeta) []byte {
+	return writeCourseInfoListResponseWithResult(s, list, true)
+}
+
+// writeCourseInfoListResponseWithResult is the same envelope but with
+// a caller-chosen trailing bool. Used by m=72 (sm=method72), which
+// inverts the bool: false = "more pages exist". Most callers should
+// use writeCourseInfoListResponse.
+func writeCourseInfoListResponseWithResult(s *nex.Settings, list []*courseMeta, result bool) []byte {
 	out := nex.NewStreamOut(s)
 	out.U32(uint32(len(list)))
 	for _, m := range list {
@@ -322,7 +329,7 @@ func writeCourseInfoListResponse(s *nex.Settings, list []*courseMeta) []byte {
 		}
 		out.Write(buildCourseInfo(s, m))
 	}
-	out.Bool(true)
+	out.Bool(result)
 	return out.Bytes()
 }
 
@@ -337,6 +344,29 @@ func writeCourseInfoListResponsePaginated(s *nex.Settings, list []*courseMeta, o
 	page := paginate(list, offset, size)
 	hasMore = offset+size < uint32(len(list)) || (size == 0 && offset < uint32(len(list)))
 	return writeCourseInfoListResponse(s, page), hasMore
+}
+
+// writeCourseInfoListWithRanksResponse emits the leaderboard envelope:
+// list<CourseInfo> + list<u32 ranks> + bool true. ranks is 1:1 with
+// the courses list (same length, same order). Used by m=58
+// (search_courses_leaderboard), which populates ranks with 0 ("no
+// rank assigned") for every course since we have no real ranking
+// system yet.
+func writeCourseInfoListWithRanksResponse(s *nex.Settings, list []*courseMeta, ranks []uint32) []byte {
+	out := nex.NewStreamOut(s)
+	out.U32(uint32(len(list)))
+	for _, m := range list {
+		if m == nil || !m.Ready {
+			continue
+		}
+		out.Write(buildCourseInfo(s, m))
+	}
+	out.U32(uint32(len(ranks)))
+	for _, r := range ranks {
+		out.U32(r)
+	}
+	out.Bool(true)
+	return out.Bytes()
 }
 
 // buildCoursePlayStatsMap converts a courseMeta's play/clear/attempt counters into
@@ -535,17 +565,11 @@ func smm2SearchCoursesByMethod72(conn *nex.Connection, req *nex.RMCMessage) *nex
 
 	list, total := courses.listAllReadyPaginated(offset, limit)
 	hasMore := (offset + len(list)) < total
-
-	out := nex.NewStreamOut(s)
-	out.U32(uint32(len(list)))
-	for _, m := range list {
-		out.Write(buildCourseInfo(s, m))
-	}
-	out.Bool(!hasMore) // bool=false means "more pages exist" (inverted)
+	body := writeCourseInfoListResponseWithResult(s, list, !hasMore) // bool=false means "more pages exist" (inverted)
 
 	fmt.Printf("[SMM2 Courses] search_courses_method72(72) pid=%d offset=%d limit=%d -> %d course(s) [total=%d, has_more=%v]\n",
 		conn.PID, offset, limit, len(list), total, hasMore)
-	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, body)
 }
 
 // smm2SearchCoursesLeaderboard handles the undocumented method 58 — the
@@ -574,26 +598,18 @@ func smm2SearchCoursesLeaderboard(conn *nex.Connection, req *nex.RMCMessage) *ne
 
 	list := courses.listAllReadyByHotness(100)
 
-	out := nex.NewStreamOut(s)
-	out.U32(uint32(len(list))) // list<CourseInfo>
-	for _, m := range list {
-		out.Write(buildCourseInfo(s, m))
-	}
-	out.U32(uint32(len(list))) // list<u32> ranks, 1:1 with CourseInfo
-	for range list {
-		// We don't have a real ranking system (no play times, no scores),
-		// so every course's "rank" is 0 ("no rank assigned yet"). The client
-		// can use this to render an em-dash or "—" next to each entry, or
-		// to fall back to the order in the courses list. 1-indexed ranks
-		// (1=top) was tried first but the client returned a "communication
-		// error" — the rank value 0 is more conservative and matches the
-		// semantic of "no leaderboard activity for this course".
-		out.U32(0)
-	}
-	out.Bool(true) // result
+	// Every course's rank is 0 ("no rank assigned yet") — we don't have a
+	// real ranking system (no play times, no scores) yet. The client uses
+	// 0 to render an em-dash or "—" next to each entry, or falls back to
+	// the order in the courses list. 1-indexed ranks (1=top) was tried
+	// first but the client returned a "communication error" — the rank
+	// value 0 is more conservative and matches the semantic of "no
+	// leaderboard activity for this course".
+	ranks := make([]uint32, len(list))
+	body := writeCourseInfoListWithRanksResponse(s, list, ranks)
 
 	fmt.Printf("[SMM2 Courses] search_courses_leaderboard(58) pid=%d -> %d course(s) with ranks\n", conn.PID, len(list))
-	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, body)
 }
 
 // smm2GetReqGetInfoHeadersInfo handles get_req_get_info_headers_info(134). Per
