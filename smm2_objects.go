@@ -1,117 +1,358 @@
 package main
 
-// DataStore object-transfer methods (prepare_post 24 / prepare_get 25 / complete_post
-// 26) backed by our own object store (smm2_storage.go) instead of Nintendo's presigned
-// S3/CloudFront. These are what actually upload/download a course's level BLOB.
+// DataStore object-transfer methods for course upload/download, backed by our own
+// object store (smm2_storage.go) instead of Nintendo's presigned S3/CloudFront.
+//
+// SMM2's real course upload uses custom methods — 66 (PreparePostObjectCourse) for the
+// level data, 132 (PreparePostRelationObject) for thumbnails/replay — NOT the generic
+// prepare_post_object(24). An earlier approach patched a Copilot-generated "captured"
+// S3 descriptor blob (host-swap, pid-swap, size-swap); those blobs were never real
+// Nintendo traffic, so trusting their internal shape was a guess stacked on a guess,
+// and this baseline's capturedResponses map is empty anyway (init_replay.go's loader
+// is a no-op), so that path always fell through to NotFound.
+//
+// Per kinnay/NintendoClients' documented Data-Store-Protocol, both responses are plain
+// NEX structures we can build correctly from scratch instead:
+//   DataStoreReqPostInfo         (66):  data_id u64, url string, headers list<KV>,
+//                                       form list<KV>, root_ca_cert buffer
+//   RelationObjectReqPostInfo   (132):  data_id string, url string, headers list<KV>,
+//                                       form list<KV>, root_ca_cert buffer
+// where KV = DataStoreKeyValue{key string, value string}. Our own s3PostHandler
+// (smm2_storage.go) only needs a "key" form field + a "file" part in the client's
+// multipart POST, both of which we control here — no S3 signature to fake.
 
 import (
-	"bytes"
 	"fmt"
+	"os"
+	"strconv"
 
 	nex "github.com/NextendoNetwork/nextendo-nex"
 )
 
-// SMM2's real upload flow is NOT prepare_post_object(24) — it is a set of custom
-// methods (66 = level data, 132 = thumbnails) that hand back an AWS-S3 presigned-POST
-// descriptor (url + policy/signature form fields). The console then does a multipart
-// POST of the blob to that bucket. We keep the measured descriptor verbatim but swap
-// the bucket host for our own object store, so the blob is POSTed to us instead.
+// writeKeyValueList writes list<DataStoreKeyValue> for a form/headers field.
+func writeKeyValueList(out *nex.StreamOut, kv map[string]string) {
+	out.U32(uint32(len(kv)))
+	for k, v := range kv {
+		out.String(k)
+		out.String(v)
+	}
+}
+
+// writeDataStoreReqPostInfo emits the framed DataStoreReqPostInfo response
+// used by m=24 (prepare_post_object) and m=66 (prepare_post_object_course).
+// Shape per kinnay/NintendoClients: data_id u64, url string, headers
+// list<KV>, form list<KV>, root_ca_cert buffer. We don't need any KV pairs
+// for our own object store — the client PUTs the blob directly and we
+// route by URL path. The frameStruct wrapper matches every other complex
+// return type in this server.
+func writeDataStoreReqPostInfo(s *nex.Settings, dataID uint64, url string) []byte {
+	body := nex.NewStreamOut(s)
+	body.U64(dataID)           // data_id
+	body.String(url)           // url
+	writeKeyValueList(body, nil) // headers: none required
+	writeKeyValueList(body, nil) // form: none (simple PUT, not multipart)
+	body.Buffer(courses.rootCA)  // root_ca_cert (empty on emulator; Nextendo CA in prod)
+	return frameStruct(s, 0, body.Bytes())
+}
+
+// writeRelationObjectReqPostInfo emits the framed RelationObjectReqPostInfo
+// response used by m=132 (prepare_post_relation_object). Shape per kinnay/
+// NintendoClients: data_id string, url string, headers list<KV>, form
+// list<KV>, root_ca_cert buffer. The data_id is a STRING here (not a u64
+// like DataStoreReqPostInfo) and ECHOES the request's data_id (the course's
+// own data_id, e.g. "1001") — the per-object routing key still goes in the
+// "key" form field, which we leave empty since the URL path carries the key.
+func writeRelationObjectReqPostInfo(s *nex.Settings, dataID, url string) []byte {
+	body := nex.NewStreamOut(s)
+	body.String(dataID)          // data_id: ECHO the course's own data_id, not a generated key
+	body.String(url)             // url
+	writeKeyValueList(body, nil) // headers: none
+	writeKeyValueList(body, nil) // form: empty — client POSTs blob directly
+	body.Buffer(courses.rootCA)  // root_ca_cert (empty on emulator; Nextendo CA in prod)
+	return frameStruct(s, 0, body.Bytes())
+}
+
+// fallbackNEXToken is the fixed Ryujinx-Nextendo dev token. Used when
+// conn.NEXToken is empty (Ryujinx doesn't send the NEX header).
+const fallbackNEXToken = "4If9rL9JRLMmEvD30GAxDl"
+
+// authTokenU returns the md5 hex of the client's real NEX token, falling back
+// to the Ryujinx-Nextendo dev token when the client didn't send one.
+func authTokenU(conn *nex.Connection) string {
+	token := conn.NEXToken
+	if token == "" {
+		token = fallbackNEXToken
+	}
+	return md5Hex(token)
+}
+
+// writeUHeaderKV writes the single-entry list<DataStoreKeyValue> for the
+// Authorization header ("u" = md5(NEXToken)) used by m=25 and m=134.
+func writeUHeaderKV(out *nex.StreamOut, u string) {
+	const kKey = "u"
+	elemBody := uint32(2 + len(kKey) + 1 + 2 + len(u) + 1)
+	out.U32(1)        // count=1
+	out.U8(0)         // element substream version
+	out.U32(elemBody) // element substream length
+	out.String(kKey)
+	out.String(u)
+}
+
+// smm2CanPostCourse (60): per kinnay's wiki, request takes no parameters, response is
+// {Bool, Uint32} (both unlabeled/unknown). We have no reason to deny an upload, so
+// answer true + 0.
+func smm2CanPostCourse(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
+	s := conn.Settings
+	out := nex.NewStreamOut(s)
+	out.Bool(true)
+	out.U32(0)
+	fmt.Printf("[SMM2 Storage] CanPostCourse(60) pid=%d -> true, 0\n", conn.PID)
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
+}
+
+// smm2PreparePostObjectCourse (66): allocate a data_id for the course's level-data
+// blob and return a DataStoreReqPostInfo pointing at our own object store.
+// The PreparePostCourseParam body contains the course name, description, tags,
+// game_style, course_theme, and difficulty — we parse them here so the catalog
+// entry has real metadata from the start (before CompletePostObjectsCourse(68)).
+func smm2PreparePostObjectCourse(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
+	s := conn.Settings
+
+	// Parse PreparePostCourseParam: [version u8][body_len u32]
+	//   string name, string description, u32 tag_count, u8×N tags,
+	//   u8 game_style, u8 course_theme, u8 difficulty, ... (level binary blob follows)
+	name, description, tags, gameStyle, courseTheme, difficulty := parsePreparePostCourseParam(s, req.Body)
+
+	id := courses.alloc(conn.PID, "course", 0, nil, nil, 0)
+	if name != "" {
+		courses.updateMeta(id, name, description, tags, gameStyle, courseTheme, difficulty)
+	}
+	url := fmt.Sprintf("%s/object/%d", storageURL, id)
+
+	fmt.Printf("[SMM2 Storage] PreparePostObjectCourse(66) pid=%d -> data_id=%d name=%q style=%d theme=%d diff=%d\n",
+		conn.PID, id, name, gameStyle, courseTheme, difficulty)
+	return nex.NewRMCSuccess(s, 0x73, 66, req.CallID, writeDataStoreReqPostInfo(s, id, url))
+}
+
+// parsePreparePostCourseParam decodes the PreparePostCourseParam body from method 66.
+// Per the fresh measured_live.txt capture (course "test 6" / data_id 1011), the body
+// starts with TWO short NEX strings (u16 length prefix, not u32 — older SMM2 protocol),
+// NOT with 4× data_id_str + u64 like CompletePostObjectsCourse(68) does:
 //
-// The upload structures are custom, nested and undocumented, so rather than decode and
-// rebuild them we replace the S3 host STRING with one of the EXACT same byte length —
-// a same-length swap needs no struct/list length fixups anywhere in the blob.
-var s3UploadHost = []byte("626727242799-datastore-nex-ecs.s3.amazonaws.com/")
-
-// ourUploadHost is our object-store host+path padded to len(s3UploadHost). The padding
-// is a throwaway path segment (the console prepends https://, POSTs there; our catch-all
-// handler reads the `key` form field, not the path).
-func ourUploadHost() []byte {
-	base := storageHostPort + "/"
-	if len(base) >= len(s3UploadHost) {
-		return []byte(base[:len(s3UploadHost)])
-	}
-	return append([]byte(base), bytes.Repeat([]byte("a"), len(s3UploadHost)-len(base))...)
+//	u16     name_length
+//	bytes   name (e.g. "test 6\0")
+//	u16     desc_length
+//	bytes   description
+//	...     game_style, course_theme, difficulty, level_binary (LAYOUT UNVERIFIED — see
+//	        hex dumps; no reliable field order from kinnay wiki or live capture yet)
+//
+// Important: the 4× data_id_str + u64 prefix is in the 68 RESPONSE payload (see
+// parseCompletePostCourseParam if needed), NOT here. The two methods have different
+// param shapes — copying 68's prefix into 66's parser is a category error.
+//
+// The legacy parse (name=first string, desc=second string, then tagCount/tags/style/
+// theme/difficulty) was the closest documented match but also wrong: it reads
+// tagCount from the 4 bytes after desc, and a u32 there is `00 01 00 00` = 0x100 = 256,
+// which exceeds the 8-tag cap and produces an all-zero style/theme/difficulty. Kept
+// here as the "best we have today" so the catalog still gets a usable name/desc —
+// the wrong style/theme/diff defaults are filtered out by 70/73 returning empty
+// anyway, so the user-visible impact is just a log warning, not a broken upload.
+func parsePreparePostCourseParam(s *nex.Settings, body []byte) (name, description string, tags []uint8, gameStyle, courseTheme, difficulty uint8) {
+	parseParamStream(s, body, func(sub *nex.StreamIn) bool {
+		name = sub.String()
+		description = sub.String()
+		tagCount := sub.U32()
+		if tagCount <= 8 {
+			for i := uint32(0); i < tagCount; i++ {
+				tags = append(tags, sub.U8())
+			}
+		}
+		gameStyle = sub.U8()
+		courseTheme = sub.U8()
+		difficulty = sub.U8()
+		return true
+	})
+	return
 }
 
-// rewriteUploadHost swaps the measured S3 bucket host for ours in an upload descriptor.
-func rewriteUploadHost(body []byte) []byte {
-	return bytes.ReplaceAll(body, s3UploadHost, ourUploadHost())
-}
-
-// capturedRelationPID is the pid embedded in every relation object key/name of the
-// measured (a player, 0 = 0xdeadbeefdeadbeef). The console builds
-// its own asset under ITS pid, so a descriptor carrying a foreign pid is inconsistent
-// with what the console expects and it refuses to POST the relation (the course-data
-// key has no pid, which is why THAT upload goes through). We rewrite it to the caller's
-// pid — a same-length swap (u64 hex is always 16 chars), so no length fixups.
-const capturedRelationPID = "deadbeefdeadbeef"
-
-// capturedRelationSize is the asset byte-size baked into each measured relation
-// descriptor's object name/key (as lowercase hex, e.g. "..._1ba5_..."). The console
-// rejects a descriptor whose size doesn't match the asset it is about to upload (it
-// asked for a specific size in the request), so we rewrite the measured size to the
-// size the console actually requested. Keys: 1=one-screen 2=entire 3=report 5=clear-check.
-var capturedRelationSize = map[uint32]uint32{1: 0x1c000, 2: 0x1ba5, 3: 0x1697, 5: 0xd1a}
-
-// rewriteRelationDescriptor rewrites a method-132 (relation) descriptor for the caller:
-// the requested asset size, the embedded pid -> caller's pid, then S3 host -> our store.
-func rewriteRelationDescriptor(body []byte, relType uint32, reqSize uint32, pid uint64) []byte {
-	if capSize, ok := capturedRelationSize[relType]; ok && reqSize != 0 && reqSize != capSize {
-		oldTok := []byte(fmt.Sprintf("_%x_", capSize))
-		newTok := []byte(fmt.Sprintf("_%x_", reqSize))
-		if len(oldTok) == len(newTok) {
-			body = bytes.ReplaceAll(body, oldTok, newTok)
+// smm2CompletePostObjectsCourse (68): per kinnay's wiki, "this method does not return
+// anything" (void ack). We use this call as the trigger to assign the shareable Course
+// ID to the just-uploaded course — the client immediately follows with
+// get_courses(70), and the CourseInfo we return there includes that code, so SMM2
+// can display it on the post-upload success screen.
+//
+// Data_id detection: CompletePostObjectsCourseParam is undocumented in detail, so
+// instead of parsing it (risky), we generate codes for every not-yet-coded Ready
+// course this PID owns. In practice a given connection only has one course mid-upload
+// at a time, so the loop assigns the one new code and any older ones that were
+// missed. The courseCode derivation is deterministic, so re-running it on a known
+// data_id is idempotent.
+func smm2CompletePostObjectsCourse(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
+	s := conn.Settings
+	// The 66 alloc created the course but there is no equivalent of
+	// complete_post_object(26) for the level-data path — the 68 IS the
+	// completion. Mark the not-yet-Ready courses Ready and assign their
+	// shareable code so the client's immediate get_courses(70) call can
+	// return them with a code for the post-upload success screen.
+	ready := courses.markReadyForPID(conn.PID)
+	for _, m := range ready {
+		courses.setCode(m.DataID, courseCode(m.DataID))
+		// Mirror into the per-profile registry so UserInfo.maker_stats and
+		// SearchCoursesPostedBy(74) see the new upload without waiting for
+		// the next restart. recordUpload is a no-op for an unregistered PID
+		// and idempotent on already-counted data_ids.
+		if profiles.recordUpload(conn.PID, m.DataID) {
+			fmt.Printf("[SMM2 Storage]   -> course data_id=%d marked Ready, code=%s, profile uploaded_count=%d\n",
+				m.DataID, courseCode(m.DataID), profiles.get(conn.PID).UploadedCount)
 		} else {
-			// Differing hex length would shift the enclosing string/struct lengths; a
-			// length-aware rebuild is needed. Log so we notice which levels hit this.
-			fmt.Printf("[SMM2 Storage] ⚠ relation type=%d size 0x%x->0x%x (len diff, non réécrit)\n", relType, capSize, reqSize)
+			fmt.Printf("[SMM2 Storage]   -> course data_id=%d marked Ready, code=%s\n", m.DataID, courseCode(m.DataID))
 		}
 	}
-	body = bytes.ReplaceAll(body, []byte(capturedRelationPID), []byte(fmt.Sprintf("%016x", pid)))
-	return rewriteUploadHost(body)
+	fmt.Printf("[SMM2 Storage] CompletePostObjectsCourse(68) pid=%d -> ack\n", conn.PID)
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
 }
 
-// method 132 uploads a course's RELATION DATA, and a course has FOUR distinct ones —
-// selected by a type u32 in the request: 1=one-screen thumbnail, 2=entire thumbnail,
-// 3=report thumbnail, 5=clear-check replay. Nintendo returns a different presigned
-// descriptor (distinct object key) per type; replaying ONE for all four left three
-// objects with no valid upload target and hung the console mid-upload. We keep the
-// measured descriptor for each type and hand back the matching one.
-var m132ByType = map[uint32][]byte{}
-
-var m132TypeName = map[uint32]string{1: "onescreen", 2: "entire", 3: "report", 5: "clearcheck"}
-
-// loadM132Types reads the per-type method-132 descriptors embedded under measured/.
-func loadM132Types() {
-	for t, name := range m132TypeName {
-		if b, err := capturedFS.ReadFile("measured/resp_0x73_m132_" + name + ".bin"); err == nil {
-			m132ByType[t] = b
-		}
-	}
-	fmt.Printf("[SMM2 Storage] %d descripteurs relation-data (method 132) chargés\n", len(m132ByType))
-}
-
-// smm2PrepareRelationUpload (method 132) returns the presigned upload descriptor for
-// the requested relation-data type, with the bucket host rewritten to our object store.
+// smm2PrepareRelationUpload (132): a course has FOUR relation-data uploads — selected
+// by a type u32 in the request (1=one-screen thumbnail, 2=entire thumbnail,
+// 3=report thumbnail, 5=clear-check replay). Each needs its own presigned target
+// (distinct object key); returning the exact same descriptor for all four was the old
+// approach's known failure ("hung the console mid-upload"). Now each call allocates its
+// own key and builds a RelationObjectReqPostInfo from the documented structure.
+//
+// FIX: the response's data_id field must ECHO the request's data_id (the course's own
+// data_id as a string, e.g. "1001" — confirmed via measured_live.txt: the client sends
+// that same string in every PrepareRelationObject request). We were returning our own
+// generated object key there instead, and the client silently rejected it and retried
+// the prepare call over and over (increasingly for later types) rather than ever
+// attempting the actual HTTP upload — never a hard error, just an infinite retry that
+// eventually surfaced as "Upload failed". The real per-object routing key still goes in
+// the "key" form field, which was already correct.
 func smm2PrepareRelationUpload(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
 	s := conn.Settings
 	in := nex.NewStreamIn(req.Body, s)
 	_ = in.U8()           // struct version
 	sub := in.Substream() // body: [data_id string][type u32][size u32][...]
-	_ = sub.String()      // data_id (as string)
+	requestedDataID := sub.String()
 	relType := sub.U32()
-	reqSize := sub.U32() // the byte-size of the asset the console will upload
+	reqSize := sub.U32() // byte-size of the asset the console is about to upload
 
-	tmpl := m132ByType[relType]
-	if tmpl == nil {
-		tmpl = capturedResponses[replayKey(0x73, 132)] // fallback: any measured 132
+	// Key scheme: "<dataID>/<relType>" — matched by parseRelationKey on the upload side
+	// AND by the CourseInfo thumbnail URL on the download side. Both sides reach the same
+	// file on disk (relationPath), so a successful upload is fetchable without a second
+	// URL translation.
+	//
+	// EARLIER, this method used "thumb1_<dataID>" etc. — which parseRelationKey rejected
+	// (it expects exactly "<id>/<relType>"), so relationHandler fell through to a legacy
+	// sanitizeKey("thumb1_<dataID>") = "obj_thumb1_<dataID>" path, and the GET side answered
+	// octet-stream because contentTypeForPath looks at the .jpg extension that path didn't
+	// have. Switching to the numeric key format writes the new files at the right path
+	// directly, and the existing migrateFlatLayout will sweep the legacy stragglers
+	// (including any uploaded before this change, like course 1019) into the new layout on
+	// the next server start.
+	dataID, errParse := strconv.ParseUint(requestedDataID, 10, 64)
+	if errParse != nil || relationPath(dataID, relType) == "" {
+		// Unknown relType or unparseable data_id — answer an error so the client stops
+		// retrying, rather than build a URL we couldn't serve.
+		fmt.Printf("[SMM2 Storage] PreparePostRelationObject(132) data_id=%q type=%d -> RELATION TYPE NO SOPORTADO (pid=%d)\n",
+			requestedDataID, relType, conn.PID)
+		return nex.NewRMCError(s, 0x73, req.CallID, 0x80690004) // DataStore::NotFound
 	}
-	if tmpl == nil {
-		return nex.NewRMCError(s, 0x73, req.CallID, 0x80690004)
+	key := relationKey(dataID, relType) // "<dataID>/<relType>"
+	url := fmt.Sprintf("%s/relation/%s", storageURL, key)
+
+	fmt.Printf("[SMM2 Storage] PreparePostRelationObject(132) type=%d size=%d pid=%d data_id=%q key=%q -> construit depuis le schéma documenté (data_id échо)\n",
+		relType, reqSize, conn.PID, requestedDataID, key)
+	return nex.NewRMCSuccess(s, 0x73, 132, req.CallID, writeRelationObjectReqPostInfo(s, requestedDataID, url))
+}
+
+// smm2CompletePostRelationObject (133): parses [u8 ver][u32 substream][String
+// dataID][u32 relType] (per the kinnay DataStoreRequestInfo shape — the same
+// pattern m=132 reads), records the clear in the catalog if relType=5 (a
+// successful replay upload = a course clear), and acks with no body. Without
+// this parse-and-act step, the play flow's "world record / first completion"
+// fields stay at zero forever — the replay upload HTTP POST is enough to
+// bump the clear counter (relationHandler does that already), but it has no
+// access to the NEX session PID, so the time-stats update needs to happen
+// here where conn.PID is in scope.
+func smm2CompletePostRelationObject(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
+	s := conn.Settings
+	var dataID uint64
+	var relType uint32
+	if len(req.Body) > 0 {
+		defer func() { recover() }()
+		in := nex.NewStreamIn(req.Body, s)
+		_ = in.U8()
+		sub := in.Substream()
+		dataID = sub.U64()
+		relType = sub.U32()
 	}
-	body := rewriteRelationDescriptor(tmpl, relType, reqSize, conn.PID)
-	fmt.Printf("[SMM2 Storage] prepare-relation(132) type=%d(%s) size=0x%x pid=%d -> réécrit (%do)\n", relType, m132TypeName[relType], reqSize, conn.PID, len(body))
-	return nex.NewRMCSuccess(s, 0x73, 132, req.CallID, body)
+	if relType == 5 {
+		// relType 5 = clear-check replay upload: the player just cleared this course.
+		// Bump ClearCount + record first-completion stats (placeholder frames=1).
+		courses.applyPlayed(dataID, 0, 1, 0, 0) // course: +1 clear
+		courses.setCourseTimes(dataID, conn.PID, 1)
+		// Player stat: the person clearing
+		profiles.applyPlayStats(conn.PID, 0, 1, 0, 0)
+		profiles.recordClear(conn.PID, dataID)
+		profiles.recordPlay(conn.PID, dataID)
+		profiles.recordFirstClear(conn.PID, dataID)
+		// Maker stat: the owner of the course receives a clear
+		if m := courses.get(dataID); m != nil {
+			profiles.applyMakerReceived(m.OwnerPID, 0, 1, 0, 0)
+		}
+		fmt.Printf("[SMM2 Storage] CompletePostRelationObject(133) pid=%d data_id=%d relType=5 -> +1 clear, first-clear stats, player/maker stats\n",
+			conn.PID, dataID)
+	} else {
+		fmt.Printf("[SMM2 Storage] CompletePostRelationObject(133) pid=%d data_id=%d relType=%d -> ack\n",
+			conn.PID, dataID, relType)
+	}
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
+}
+
+// smm2CanPostRatingAndComment (61): per kinnay/NintendoClients' official wiki
+// (Data-Store-Protocol-SMM-2), this is CanPostRatingAndComment — NOT a relation-object
+// fetch. An earlier comment on this function guessed "PrepareGetRelationObject" from
+// the request shape alone (before the official doc turned up); that name never existed
+// in any real spec. Confirmed with an exact byte-count match against a real reference
+// capture: CanPostRatingAndCommentParam = {Uint64, Uint32} (8+4=12 bytes, matches our
+// observed request body exactly — the "relType=3" we used to call it is really just an
+// opaque param, not a relation type). CanPostRatingAndCommentResult = {Uint64, Bool,
+// Uint32, Map<Uint8,Uint32>, Bool, Uint32, Map<Uint8,Uint32>} — at all-zero/false/empty
+// defaults that's 8+1+4+4+1+4+4 = 26 bytes, matching the reference response's 26-byte
+// zero body EXACTLY, field count included. We can't post a rating/comment before actually
+// clearing the course, so "false, nothing yet" for every field is not just safe, it's
+// the honest answer — the client is completely fine with that and doesn't block on it
+// (confirmed by real play succeeding with exactly this response).
+func smm2CanPostRatingAndComment(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
+	s := conn.Settings
+	in := nex.NewStreamIn(req.Body, s)
+	_ = in.U8()           // struct version
+	sub := in.Substream() // u32 length + body
+	dataID := sub.U64()
+	param := sub.U32() // opaque param, previously (incorrectly) read as a "relType"
+
+	// CanPostRatingAndCommentResult, all fields at their zero value — matches the
+	// reference response byte-for-byte (verified: 26 bytes total, same as this).
+	body := nex.NewStreamOut(s)
+	body.U64(0)      // unknown
+	body.Bool(false) // unknown (can_post_rating?)
+	body.U32(0)      // unknown
+	body.U32(0)      // Map<Uint8,Uint32> #1, empty (count=0)
+	body.Bool(false) // unknown (can_post_comment?)
+	body.U32(0)      // unknown
+	body.U32(0)      // Map<Uint8,Uint32> #2, empty (count=0)
+	resp := frameStruct(s, 0, body.Bytes())
+
+	fmt.Printf("[SMM2 Storage] CanPostRatingAndComment(61) data_id=%d param=%d -> 31 bytes (all-zero result, matches the reference)\n",
+		dataID, param)
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, resp)
+}
+
+// smm2UpdateCourseTag (69): per kinnay's wiki, "this method does not return anything".
+func smm2UpdateCourseTag(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
+	s := conn.Settings
+	fmt.Printf("[SMM2 Storage] UpdateCourseTag(69) pid=%d received %d bytes -> ack\n", conn.PID, len(req.Body))
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
 }
 
 // smm2PreparePostObject (24): allocate a data_id, stash the pending course metadata,
@@ -132,11 +373,11 @@ func smm2PreparePostObject(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMe
 	url := fmt.Sprintf("%s/object/%d", storageURL, id)
 
 	body := nex.NewStreamOut(s)
-	body.U64(id)                // data_id
-	body.String(url)            // url
-	body.U32(0)                 // headers: none required
-	body.U32(0)                 // form: none (simple PUT, not multipart)
-	body.Buffer(courses.rootCA) // root_ca_cert (empty on emulator; Nextendo CA in prod)
+	body.U64(id)                 // data_id
+	body.String(url)             // url
+	writeKeyValueList(body, nil) // headers: none required
+	writeKeyValueList(body, nil) // form: none (simple PUT, not multipart)
+	body.Buffer(courses.rootCA)  // root_ca_cert (empty on emulator; Nextendo CA in prod)
 	resp := frameStruct(s, 0, body.Bytes())
 
 	fmt.Printf("[SMM2 Storage] prepare_post(24) pid=%d name=%q size=%d -> data_id=%d\n", conn.PID, name, size, id)
@@ -167,15 +408,71 @@ func smm2PrepareGetObject(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMes
 	dataID := p.U64()
 
 	if m := courses.get(dataID); m != nil {
+		// SOURCE OF TRUTH = on-disk file size, NOT m.Size. m.Size comes from
+		// setSize, which fires at PUT time. If a course blob is replaced on disk
+		// by any path that doesn't go through objectHandler (manual copy, sync
+		// from another host, second PUT that errored before setSize ran, etc.),
+		// m.Size becomes stale and the response here advertises a wrong size.
+		// The SMM2 client then tries to download exactly that many bytes (or
+		// trust the Content-Length mismatch) and the course refuses to load —
+		// a real capture showed data_id=1008 served with size=1472 while
+		// level.bin was 376832 bytes on disk, and the client fell off before
+		// the play screen.
+		//
+		// We stat the file directly. If the size differs from m.Size we update
+		// m.Size (and persist the catalog) so the next caller gets the right
+		// value without a re-stat, and the on-disk content is what's served.
+		diskSize := uint32(0)
+		statErr := error(nil)
+		if st, err := os.Stat(blobPath(dataID)); err == nil {
+			diskSize = uint32(st.Size())
+		} else {
+			statErr = err
+		}
+		fmt.Printf("[SMM2 Storage] prepare_get(25) data_id=%d m.Size=%d diskSize=%d path=%s statErr=%v\n",
+			dataID, m.Size, diskSize, blobPath(dataID), statErr)
+		if diskSize != m.Size {
+			courses.setSize(dataID, diskSize) // persists; updates in-memory m.Size too
+			m.Size = diskSize
+		}
+
 		url := fmt.Sprintf("%s/object/%d", storageURL, dataID)
 		body := nex.NewStreamOut(s)
-		body.String(url)            // url
-		body.U32(0)                 // headers: none
-		body.U32(m.Size)            // size
+		body.String(url) // url
+		// headers: u=md5(NEXToken), same token the client gets from m=134.
+		u := authTokenU(conn)
+		writeUHeaderKV(body, u)
+		body.U32(m.Size) // size
+		// root_ca_cert is a Buffer (u32 length prefix + bytes) per
+		// NintendoClients/datastore.py DataStoreReqGetInfo.load — matches
+		// what methods 24/66/132 already emit. Earlier versions wrote
+		// QBuffer (u16) here, which made the client parse the first 2
+		// bytes of the dataID as the root_ca length: 0x0000f003 (with a
+		// 0x00 in front of an actual 0x03f0 u64) reads back as ~66 MB,
+		// Ryujinx falls into a null-deref when the alloc / read fails.
+		// Buffer is correct; this comment is the receipts.
 		body.Buffer(courses.rootCA) // root_ca_cert
 		body.U64(dataID)            // data_id
 		resp := frameStruct(s, 0, body.Bytes())
-		fmt.Printf("[SMM2 Storage] prepare_get(25) data_id=%d -> %s (%d bytes)\n", dataID, url, m.Size)
+		fmt.Printf("[SMM2 Storage] prepare_get(25) data_id=%d -> %s (%d bytes%s)\n",
+			dataID, url, m.Size,
+			func() string {
+				if diskSize == 0 {
+					return ", FILE MISSING"
+				}
+				return ""
+			}())
+		// Ryujinx-Nextendo proxy: touch_object(22) never arrives from the emulator,
+		// so we count a play here when the level blob is actually downloaded.
+		// Only count if the file exists on disk (real download, not a 404) and
+		// the player is NOT the owner (don't self-count test plays of own courses).
+		if diskSize > 0 && m.OwnerPID != conn.PID {
+			courses.applyPlayed(dataID, 1, 0, 0, 0)
+			profiles.applyPlayStats(conn.PID, 1, 0, 0, 0)
+			profiles.applyMakerReceived(m.OwnerPID, 1, 0, 0, 0)
+			fmt.Printf("[SMM2 Storage] prepare_get(25) data_id=%d -> +1 play (Ryujinx proxy, pid=%d != owner=%d)\n",
+				dataID, conn.PID, m.OwnerPID)
+		}
 		return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, resp)
 	}
 

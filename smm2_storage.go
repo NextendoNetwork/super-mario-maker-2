@@ -51,15 +51,59 @@ var (
 
 // courseMeta is the catalog entry for one uploaded course.
 type courseMeta struct {
-	DataID    uint64   `json:"data_id"`
-	OwnerPID  uint64   `json:"owner_pid"`
-	Name      string   `json:"name"`
-	DataType  uint16   `json:"data_type"`
-	MetaHex   string   `json:"meta_hex"` // course header (SMM2 meta_binary), hex
-	Tags      []string `json:"tags"`
-	Size      uint32   `json:"size"`
-	Ready     bool     `json:"ready"` // set by complete_post_object
-	CreatedAt int64    `json:"created_at"`
+	DataID      uint64   `json:"data_id"`
+	OwnerPID    uint64   `json:"owner_pid"`
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	DataType    uint16   `json:"data_type"`
+	MetaHex     string   `json:"meta_hex"` // course header (SMM2 meta_binary), hex
+	Tags        []uint8  `json:"tags"`
+	GameStyle   uint8    `json:"game_style"`
+	CourseTheme uint8    `json:"course_theme"`
+	Difficulty  uint8    `json:"difficulty"`
+	Size        uint32   `json:"size"`
+	Ready       bool     `json:"ready"` // set by complete_post_object
+	Code        string   `json:"code"`  // SMM2 Course ID, e.g. "ABCD-1234-EFGH-5678"
+	CreatedAt   int64    `json:"created_at"`
+
+	// --- Per-course stats (the activity this course has received from players).
+	//
+	// PlayStats:  per CourseInfo.play_stats / PlayStatsKeys
+	//             (PLAYS=0, CLEARS=1, ATTEMPTS=2, DEATHS=3). All four bumped by
+	//             future play/clear/death event handlers (none wired today —
+	//             SMM2 doesn't expose a documented "I played this course" call
+	//             that we can hook).
+	//
+	// Ratings:    per CourseInfo.ratings — Map<u8, u32> indexed by slot.
+	//             Slot 0 = like, 1 = heart, 2 = boo. The rating_value 0 means
+	//             "clear previous rating" (no bump); > 0 bumps. Set by
+	//             rate_object(15).
+	//
+	// CommentStats: per CourseInfo.comment_stats — Map<u8, u32> by slot.
+	//              Slot-to-meaning undocumented. No event handler bumps these
+	//              yet (no comment-post handler is implemented).
+	PlayCount     uint32            `json:"play_count"`
+	ClearCount    uint32            `json:"clear_count"`
+	AttemptCount  uint32            `json:"attempt_count"`
+	DeathCount    uint32            `json:"death_count"`
+	LikeCount     uint32            `json:"like_count"`
+	HeartCount    uint32            `json:"heart_count"`
+	BoosCount     uint32            `json:"boos_count"`
+	RatingInitial map[uint8]int64   `json:"rating_initial"` // initial_value per slot, set on first rate
+	CommentCounts map[uint8]uint32  `json:"comment_counts"` // comment_stats per slot
+
+	// --- CourseTimeStats (the "world record" substruct SMM2 shows in the detail
+	// screen). Until a real replay-parser lands, these are placeholder values:
+	//   - FirstCompletionPID: the PID of the first player who ever cleared this
+	//     course (set on the first replay upload, frozen thereafter).
+	//   - WorldRecordHolderPID: same as first completion in our placeholder
+	//     model (we don't track per-player best times yet).
+	//   - WorldRecordFrames: 1 for the same reason — a real "best time in
+	//     1/60s frames" needs the replay decoded.
+	// All three stay zero until setCourseTimes fires for the first time.
+	FirstCompletionPID  uint64 `json:"first_completion_pid,omitempty"`
+	WorldRecordHolderPID uint64 `json:"world_record_holder_pid,omitempty"`
+	WorldRecordFrames   uint32 `json:"world_record_frames,omitempty"`
 }
 
 type courseStore struct {
@@ -97,6 +141,37 @@ func (c *courseStore) load() {
 	}
 	fmt.Printf("[SMM2 Storage] catalogue chargé: %d cours, nextID=%d, dir=%s, url=%s\n",
 		len(c.byID), c.nextID, storageDir, storageURL)
+	c.migrateFlatLayout()
+	c.migrateFakeWorldRecords()
+}
+
+// migrateFakeWorldRecords clears out world-record entries stamped by the OLD
+// setCourseTimes (before 18/8), which always wrote WorldRecordFrames=1 as a
+// placeholder regardless of the actual clear time. Now that playtimeMs is real
+// (confirmed via an on-screen screenshot, see smm2PostPlayResult), a real time
+// (typically hundreds or thousands of ms) could never beat that fake "1" under
+// the new "lower wins" comparison in setCourseTimes — so any course stuck with
+// the old placeholder would keep a wrong, unbeatable "record" forever. Detects
+// the placeholder specifically (WorldRecordFrames == 1, a value no real
+// clear time will ever legitimately land on) and resets all three time-stats
+// fields so the next real clear populates them fresh. Runs once per startup;
+// harmless (and does nothing) once every affected course has been migrated.
+func (c *courseStore) migrateFakeWorldRecords() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	reset := 0
+	for _, m := range c.byID {
+		if m.WorldRecordFrames == 1 {
+			m.FirstCompletionPID = 0
+			m.WorldRecordHolderPID = 0
+			m.WorldRecordFrames = 0
+			reset++
+		}
+	}
+	if reset > 0 {
+		c.persistLocked()
+		fmt.Printf("[SMM2 Storage] migration: %d cours avec un faux \"record\" (placeholder=1) réinitialisé(s), prêts pour un vrai temps\n", reset)
+	}
 }
 
 // persist writes the catalog back to disk (called under lock).
@@ -117,7 +192,7 @@ func (c *courseStore) persistLocked() {
 }
 
 // alloc reserves a new data_id and stashes the pending metadata.
-func (c *courseStore) alloc(ownerPID uint64, name string, dataType uint16, metaBin []byte, tags []string, size uint32) uint64 {
+func (c *courseStore) alloc(ownerPID uint64, name string, dataType uint16, metaBin []byte, tags []uint8, size uint32) uint64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	id := c.nextID
@@ -153,6 +228,188 @@ func (c *courseStore) get(dataID uint64) *courseMeta {
 	return c.byID[dataID]
 }
 
+// listReady returns a snapshot of every Ready course owned by `ownerPID`, sorted
+// newest first (by CreatedAt descending). Used by get_courses(70) to build the
+// CourseInfo list the client shows post-upload and in the maker UI.
+func (c *courseStore) listReady(ownerPID uint64) []*courseMeta {
+	c.mu.Lock()
+	ready := make([]*courseMeta, 0, len(c.byID))
+	for _, m := range c.byID {
+		if m.Ready && m.OwnerPID == ownerPID {
+			ready = append(ready, m)
+		}
+	}
+	c.mu.Unlock()
+	// Sort newest first (insertion sort, fine for the catalog sizes we expect).
+	for i := 1; i < len(ready); i++ {
+		for j := i; j > 0 && ready[j-1].CreatedAt < ready[j].CreatedAt; j-- {
+			ready[j-1], ready[j] = ready[j], ready[j-1]
+		}
+	}
+	return ready
+}
+
+// listAllReady returns every Ready course from every owner, newest first — used
+// by search_courses_latest(73) ("New Courses" in Course World), which is global
+// browsing, not scoped to the requesting player like listReady/listByOwner are.
+func (c *courseStore) listAllReady(limit int) []*courseMeta {
+	c.mu.Lock()
+	ready := make([]*courseMeta, 0, len(c.byID))
+	for _, m := range c.byID {
+		if m.Ready {
+			ready = append(ready, m)
+		}
+	}
+	c.mu.Unlock()
+	for i := 1; i < len(ready); i++ {
+		for j := i; j > 0 && ready[j-1].CreatedAt < ready[j].CreatedAt; j-- {
+			ready[j-1], ready[j] = ready[j], ready[j-1]
+		}
+	}
+	if limit > 0 && len(ready) > limit {
+		ready = ready[:limit]
+	}
+	return ready
+}
+
+// listAllReadyPaginated returns a page of Ready courses (newest first), starting
+// at byte offset `offset` with up to `limit` results, plus the total count of all
+// Ready courses. Used by method 72 (third Course World tab) which sends explicit
+// offset/limit in its 47-byte request body (body[8]=offset, body[12]=limit).
+func (c *courseStore) listAllReadyPaginated(offset, limit int) ([]*courseMeta, int) {
+	all := c.listAllReady(0) // 0 = no cap, get everything to sort
+	total := len(all)
+	if offset >= total {
+		return []*courseMeta{}, total
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	return all[offset:end], total
+}
+
+// listAllReadyByHotness returns every Ready course from every owner, sorted by a
+// simple "hotness" score (likes + hearts + plays, descending), newest as tiebreaker.
+// Used by the undocumented method 84 ("Hot Courses" in Course World) — not in the
+// official datastore_smm2 method list at all (same undocumented territory as 58/72/83,
+// which populate the same Hub), but structurally we're reusing the same buildCourseInfo
+// already confirmed working via search_courses_latest(73).
+func (c *courseStore) listAllReadyByHotness(limit int) []*courseMeta {
+	c.mu.Lock()
+	ready := make([]*courseMeta, 0, len(c.byID))
+	for _, m := range c.byID {
+		if m.Ready {
+			ready = append(ready, m)
+		}
+	}
+	c.mu.Unlock()
+	hotness := func(m *courseMeta) uint64 {
+		return uint64(m.LikeCount) + uint64(m.HeartCount) + uint64(m.PlayCount)
+	}
+	for i := 1; i < len(ready); i++ {
+		for j := i; j > 0; j-- {
+			hj, hj1 := hotness(ready[j]), hotness(ready[j-1])
+			if hj1 > hj || (hj1 == hj && ready[j-1].CreatedAt >= ready[j].CreatedAt) {
+				break
+			}
+			ready[j-1], ready[j] = ready[j], ready[j-1]
+		}
+	}
+	if limit > 0 && len(ready) > limit {
+		ready = ready[:limit]
+	}
+	return ready
+}
+
+// listByOwnerReady returns every Ready course owned by ownerPID, sorted newest
+// first. Used by SearchCoursesPostedBy(74) — "courses posted by player X", which is
+// what the maker profile's "My courses" tab (or another player's profile page)
+// calls. Pagination is the caller's responsibility (listByOwnerReadyPaginated below
+// if a bounded scan is needed; today 74 just does the whole slice).
+func (c *courseStore) listByOwnerReady(ownerPID uint64) []*courseMeta {
+	c.mu.Lock()
+	ready := make([]*courseMeta, 0, len(c.byID))
+	for _, m := range c.byID {
+		if m.Ready && m.OwnerPID == ownerPID {
+			ready = append(ready, m)
+		}
+	}
+	c.mu.Unlock()
+	for i := 1; i < len(ready); i++ {
+		for j := i; j > 0 && ready[j-1].CreatedAt < ready[j].CreatedAt; j-- {
+			ready[j-1], ready[j] = ready[j], ready[j-1]
+		}
+	}
+	return ready
+}
+
+// setCode assigns the shareable Course ID string ("XXXX-XXXX-XXXX-XXXX") that
+// SMM2 displays post-upload. Called from CompletePostObjectsCourse(68) once the
+// upload is confirmed; persisted so the code survives server restarts.
+func (c *courseStore) setCode(dataID uint64, code string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	m := c.byID[dataID]
+	if m == nil {
+		return
+	}
+	m.Code = code
+	c.persistLocked()
+}
+
+// markReadyForPID flips Ready=true on every not-yet-Ready course owned by ownerPID
+// and returns the list. Used by CompletePostObjectsCourse(68): the 66 alloc created
+// the course but there is no separate "complete" call for it (no equivalent of
+// complete_post_object(26) for the level-data path), so the 68 is the only place
+// to mark it Ready before the client's get_courses(70) call asks for the catalog.
+// All courses for this PID are flipped, not just the newest, so a stale entry from
+// a previous failed upload also gets cleaned up.
+//
+// Also mirrors the upload into the per-profile registry (profiles.recordUpload) so
+// UserInfo.maker_stats and SearchCoursesPostedBy(74) see fresh counts without a restart.
+// recordUpload is idempotent (returns false on duplicates), so re-firing this method
+// across retries doesn't double-count.
+func (c *courseStore) markReadyForPID(ownerPID uint64) []*courseMeta {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var updated []*courseMeta
+	for _, m := range c.byID {
+		if m.OwnerPID == ownerPID && !m.Ready {
+			m.Ready = true
+			updated = append(updated, m)
+		}
+	}
+	if len(updated) > 0 {
+		c.persistLocked()
+	}
+	// Note: profiles.recordUpload is called from the caller (smm2CompletePostObjectsCourse
+	// in smm2_objects.go) after we return, so the registry update is in one place with
+	// the rest of the post-upload logging. Keeping it out of this method avoids a
+	// mu-on-mu deadlock if a future change reorders calls between the two registries.
+	return updated
+}
+
+// updateMeta writes the parsed name/description/tags/style/theme/difficulty from
+// CompletePostObjectsCourse(68) into the catalog entry.
+func (c *courseStore) updateMeta(dataID uint64, name, description string, tags []uint8, gameStyle, courseTheme, difficulty uint8) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	m := c.byID[dataID]
+	if m == nil {
+		return
+	}
+	if name != "" {
+		m.Name = name
+	}
+	m.Description = description
+	m.Tags = tags
+	m.GameStyle = gameStyle
+	m.CourseTheme = courseTheme
+	m.Difficulty = difficulty
+	c.persistLocked()
+}
+
 // setSize records the byte size once a blob PUT completes.
 func (c *courseStore) setSize(dataID uint64, size uint32) {
 	c.mu.Lock()
@@ -163,13 +420,290 @@ func (c *courseStore) setSize(dataID uint64, size uint32) {
 	}
 }
 
-func blobPath(dataID uint64) string { return filepath.Join(storageDir, strconv.FormatUint(dataID, 10)+".bin") }
+// recordRating applies a rate_object(15) event to a course. Bumps the per-slot
+// counter and records the first-seen rating value as the slot's initial_value
+// (kinnay's DataStoreRatingInfo.initial_value, the seed for future sum/count
+// aggregates). ratingValue of 0 means "clear previous rating" — no counter bump.
+//
+// Slot mapping (SMM2's DataStoreRatingTarget.slot):
+//   0 = like  → LikeCount++
+//   1 = heart → HeartCount++
+//   2 = boo   → BoosCount++
+//
+// Returns the Owner's PID (so the caller can also credit the per-profile
+// MakerStats counters in profiles.recordRating), or 0 if the course is unknown.
+func (c *courseStore) recordRating(dataID uint64, slot uint8, ratingValue int64) uint64 {
+	if ratingValue <= 0 {
+		return 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	m := c.byID[dataID]
+	if m == nil {
+		return 0
+	}
+	switch slot {
+	case 0:
+		m.LikeCount++
+	case 1:
+		m.HeartCount++
+	case 2:
+		m.BoosCount++
+	}
+	if m.RatingInitial == nil {
+		m.RatingInitial = map[uint8]int64{}
+	}
+	if _, ok := m.RatingInitial[slot]; !ok {
+		m.RatingInitial[slot] = ratingValue
+	}
+	c.persistLocked()
+	return m.OwnerPID
+}
+
+// applyPlayed adds play/clear/attempt/death deltas to a course. Called by
+// future play-event handlers. Unknown dataIDs are silently ignored (the
+// course may have been deleted between event emission and handling).
+func (c *courseStore) applyPlayed(dataID uint64, plays, clears, attempts, deaths uint32) {
+	if plays == 0 && clears == 0 && attempts == 0 && deaths == 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	m := c.byID[dataID]
+	if m == nil {
+		return
+	}
+	m.PlayCount += plays
+	m.ClearCount += clears
+	m.AttemptCount += attempts
+	m.DeathCount += deaths
+	c.persistLocked()
+}
+
+// setCourseTimes records course completion times. FirstCompletionPID is set once,
+// on the very first clear ever, and frozen thereafter (matches the documented
+// semantic: "who cleared this course first" doesn't change). WorldRecordHolderPID/
+// WorldRecordFrames, though, ARE now updated properly: FIX (18/8) — before this,
+// they were set ONLY on the first-ever clear and never touched again ("we don't
+// track per-player best times until a replay parser lands"), so a later, faster
+// clear by someone else never became the new record. Now that playtimeMs is
+// CONFIRMED real (cross-checked against an on-screen clear-time screenshot, see
+// smm2PostPlayResult's doc comment), we can compare properly: lower is better,
+// and a genuinely faster run replaces the holder.
+//
+// NOTE ON THE FIELD NAME: WorldRecordFrames is a legacy name from when this was a
+// 60fps-frame placeholder (always 1). The value is now real MILLISECONDS from
+// smm2PostPlayResult's playtimeMs — kept the JSON field name as-is (renaming would
+// break existing catalog.json entries without a migration), but treat it as
+// milliseconds everywhere it's read.
+func (c *courseStore) setCourseTimes(dataID, playerPID uint64, timeMs uint32) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	m := c.byID[dataID]
+	if m == nil {
+		return
+	}
+	firstEver := m.FirstCompletionPID == 0
+	isFasterOrFirst := m.WorldRecordHolderPID == 0 || timeMs < m.WorldRecordFrames
+	if !firstEver && !isFasterOrFirst {
+		return // not the first clear, and not a new record — nothing to update
+	}
+	if firstEver {
+		m.FirstCompletionPID = playerPID
+	}
+	if isFasterOrFirst {
+		m.WorldRecordHolderPID = playerPID
+		m.WorldRecordFrames = timeMs
+	}
+	c.persistLocked()
+	if firstEver {
+		// Mirror on the player's profile so search_courses_first_clear(80)
+		// can answer "what courses was this PID the first to clear?". We
+		// release the catalog lock first to avoid a re-entrant lock on
+		// profiles.mu — profiles.recordFirstClear takes its own lock.
+		go func() {
+			profiles.recordFirstClear(playerPID, dataID)
+		}()
+	}
+}
+
+func blobPath(dataID uint64) string { return filepath.Join(courseDir(dataID), "level.bin") }
+
+// --- Per-course file layout ------------------------------------------------------
+//
+// Everything about one course now lives under its own folder instead of being
+// scattered flat across storageDir with ad-hoc prefixes ("obj_thumb1_<id>",
+// "<id>.bin", ...) built independently in three different files. One source of
+// truth here; smm2_objects.go (upload) and smm2_courses.go (CourseInfo/read) both
+// call into it instead of re-deriving names themselves.
+//
+//   data/
+//     catalog.json
+//     profiles.json
+//     courses/
+//       <dataID>/
+//         level.bin
+//         thumb1.jpg   (one_screen_thumbnail, relType 1)
+//         thumb2.jpg   (entire_thumbnail,     relType 2)
+//         thumb3.jpg   (report thumbnail,      relType 3)
+//         replay.bin   (clear-check replay,    relType 5)
+
+// courseDir returns the per-course directory (not guaranteed to exist yet).
+func courseDir(dataID uint64) string {
+	return filepath.Join(storageDir, "courses", strconv.FormatUint(dataID, 10))
+}
+
+// thumbPath returns the on-disk path of a course thumbnail (type 1 = one_screen,
+// type 2 = entire). Returns "" if relType is not 1 or 2.
+func thumbPath(dataID uint64, relType uint32) string {
+	if relType != 1 && relType != 2 {
+		return ""
+	}
+	return filepath.Join(courseDir(dataID), fmt.Sprintf("thumb%d.jpg", relType))
+}
+
+// relationBaseName maps a PrepareRelationUpload "type" to its filename within a
+// course's directory. Returns "" for an unrecognized type.
+//
+// relType 6: seen in a real capture (dataID "13030", 146 bytes, URL field =
+// "Unknown"). Not documented in kinnay/NintendoClients. The 146-byte size +
+// repeated 0x01 patterns in the trailing body fields suggest a small metadata
+// blob (clear-time record, evaluation, or similar). Stored as "data6.bin"
+// until we have a confirmed name from a second capture that names it.
+//
+// relType 12: seen in a real capture (18/8) RIGHT AFTER a relType=6 upload for
+// the same data_id, same size (138 bytes both times) — same "finish a level"
+// post-play sequence. Not documented anywhere either. Before this was added,
+// the client got a NotFound error here and the whole post-play flow broke
+// ("communication error" right after finishing a level) — same failure shape
+// as the unhandled relType=6 case fixed earlier today. Stored as "data12.bin"
+// on the same "give it a slot, don't guess the meaning" basis as relType 6.
+//
+// DEFAULT (any other relType): rather than keep discovering these one at a time
+// — each missing case is a hard NotFound that breaks the whole post-play flow,
+// and we've already hit two undocumented ones (6, 12) in the SAME sequence,
+// suggesting there may be more further along that we just haven't seen yet —
+// accept ANY numeric relType and store it under a generic "data<N>.bin" name.
+// Worst case we store something we don't understand; best case (the likely
+// case) it silently absorbs the next unknown relType without another
+// "communication error" round-trip to diagnose.
+func relationBaseName(relType uint32) string {
+	switch relType {
+	case 1:
+		return "thumb1.jpg"
+	case 2:
+		return "thumb2.jpg"
+	case 3:
+		return "thumb3.jpg"
+	case 5:
+		return "replay.bin"
+	case 6:
+		return "data6.bin"
+	case 12:
+		return "data12.bin"
+	default:
+		return fmt.Sprintf("data%d.bin", relType)
+	}
+}
+
+// relationPath returns the on-disk path for a course's relation blob, or "" if
+// relType is unrecognized.
+func relationPath(dataID uint64, relType uint32) string {
+	name := relationBaseName(relType)
+	if name == "" {
+		return ""
+	}
+	return filepath.Join(courseDir(dataID), name)
+}
+
+// relationKey returns the "/relation/<key>" URL key for a course's relation blob —
+// used both when building the upload URL (smm2PrepareRelationUpload) and when
+// parsing an incoming request back into (dataID, relType) in relationHandler.
+func relationKey(dataID uint64, relType uint32) string {
+	return fmt.Sprintf("%d/%d", dataID, relType)
+}
+
+// parseRelationKey parses a "<dataID>/<relType>" key. ok is false if the key isn't
+// in that shape (e.g. a stale key from before this layout, still in flight).
+func parseRelationKey(key string) (dataID uint64, relType uint32, ok bool) {
+	parts := strings.SplitN(key, "/", 2)
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+	id, err1 := strconv.ParseUint(parts[0], 10, 64)
+	typ, err2 := strconv.ParseUint(parts[1], 10, 32)
+	if err1 != nil || err2 != nil {
+		return 0, 0, false
+	}
+	return id, uint32(typ), true
+}
+
+// contentTypeForPath derives a Content-Type from a stored file's extension — the
+// thumbnails are real JPEGs (confirmed: raw ffd8ffe0... JFIF bytes in every capture),
+// the replay isn't an image, so it keeps the generic type.
+func contentTypeForPath(path string) string {
+	if strings.HasSuffix(path, ".jpg") {
+		return "image/jpeg"
+	}
+	return "application/octet-stream"
+}
+
+// migrateFlatLayout moves any pre-reorg files (top-level "<id>.bin" and
+// "obj_thumb1_<id>" etc, one flat pile in storageDir) into the new courses/<id>/
+// structure, for every course already in the catalog. Safe to run every startup:
+// only touches an old path that still exists and only when the new path doesn't
+// exist yet, so it's a no-op once everything's migrated. This is what lets the
+// reorganization ship without re-uploading every course already on disk.
+func (c *courseStore) migrateFlatLayout() {
+	legacyRelNames := map[uint32]string{1: "obj_thumb1_", 2: "obj_thumb2_", 3: "obj_thumb3_", 5: "obj_replay_"}
+	moved := 0
+	for id := range c.byID {
+		idStr := strconv.FormatUint(id, 10)
+		newDir := courseDir(id)
+
+		old := filepath.Join(storageDir, idStr+".bin")
+		newP := filepath.Join(newDir, "level.bin")
+		if fileExists(old) && !fileExists(newP) {
+			_ = os.MkdirAll(newDir, 0o755)
+			if os.Rename(old, newP) == nil {
+				moved++
+			}
+		}
+		for relType, prefix := range legacyRelNames {
+			old := filepath.Join(storageDir, prefix+idStr)
+			newP := relationPath(id, relType)
+			if fileExists(old) && !fileExists(newP) {
+				_ = os.MkdirAll(newDir, 0o755)
+				if os.Rename(old, newP) == nil {
+					moved++
+				}
+			}
+		}
+	}
+	if moved > 0 {
+		fmt.Printf("[SMM2 Storage] migration: %d fichier(s) déplacé(s) vers courses/<id>/\n", moved)
+	}
+	// After the catalog is loaded AND files are in their new layout, ask the profile
+	// registry to rebuild its UploadedCount/UploadedIDs from the catalog ground truth.
+	// Catches three classes of drift: a PID uploaded before calling RegisterUser(47),
+	// a profile.json that pre-dated the per-course-dir refactor, and a profile that
+	// went out of sync after a manual edit / older server / rolled-back commit.
+	profiles.reconcileFromCatalog(c.byID)
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
 
 // startStorageServer serves blob PUT/POST/GET over HTTPS on storagePort.
 func startStorageServer() {
 	courses.load()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/object/", objectHandler)
+	mux.HandleFunc("/relation/", relationHandler)
+	mux.HandleFunc("/one_screen_thumbnail/", thumbnailHandler(1))
+	mux.HandleFunc("/entire_thumbnail/", thumbnailHandler(2))
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
 	// S3-style presigned-POST upload: SMM2 uploads a course (method 66 = level data,
 	// 132 = thumbnails) as a multipart/form-data POST carrying a `key` + `file`, exactly
@@ -183,6 +717,17 @@ func startStorageServer() {
 		mux.ServeHTTP(w, r)
 	})
 	srv := &http.Server{Addr: fmt.Sprintf(":%d", storagePort), Handler: logged}
+	// Keep-alive off: the SMM2 client (Ryujinx capture) opens a connection, does
+	// the TLS handshake, fires the GET, receives the blob — then appears to hang
+	// waiting for the connection to close. With Go's default keep-alive, the
+	// server holds the socket open for the next request; the SMM2 client doesn't
+	// issue another one and never unblocks. Closing after every response matches
+	// what the real Nintendo storage CDN does (single-shot per asset) and the
+	// extra per-request TLS handshake is cheap against localhost. The earlier
+	// note in this block about keep-alive was about the UPLOAD path (multipart
+	// POST sequence) which is a separate problem we already fixed via the form
+	// 'key' field — that comment is stale.
+	srv.SetKeepAlivesEnabled(false)
 	fmt.Printf("[SMM2 Storage] listening HTTPS :%d (blob store)\n", storagePort)
 	if err := srv.ListenAndServeTLS(certFile, keyFile); err != nil {
 		fmt.Printf("[SMM2 Storage] stopped: %v\n", err)
@@ -203,7 +748,17 @@ func objectHandler(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodPut, http.MethodPost:
-		body, _ := readAllLimited(r, 64<<20) // courses are small; cap at 64 MiB
+		body, err := extractBlobBody(r)
+		if err != nil {
+			fmt.Printf("[SMM2 Storage] %s /object/%d FAILED reading body: %v\n", r.Method, dataID, err)
+			http.Error(w, "bad body", http.StatusBadRequest)
+			return
+		}
+		if err := os.MkdirAll(courseDir(dataID), 0o755); err != nil {
+			fmt.Printf("[SMM2 Storage] PUT %d FAILED (mkdir): %v\n", dataID, err)
+			http.Error(w, "store failed", http.StatusInternalServerError)
+			return
+		}
 		if err := os.WriteFile(blobPath(dataID), body, 0o644); err != nil {
 			fmt.Printf("[SMM2 Storage] PUT %d FAILED: %v\n", dataID, err)
 			http.Error(w, "store failed", http.StatusInternalServerError)
@@ -221,7 +776,80 @@ func objectHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Content-Length", strconv.Itoa(len(b)))
-		fmt.Printf("[SMM2 Storage] GET /object/%d -> %d bytes\n", dataID, len(b))
+		fmt.Printf("[SMM2 Storage] GET /object/%d u=%q -> %d bytes\n", dataID, r.Header.Get("u"), len(b))
+		if r.Method == http.MethodGet {
+			w.Write(b)
+		}
+	default:
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+	}
+}
+
+// relationHandler stores relation-object blobs (thumbnails + clear-check replay)
+// sent by the console to the URL returned by PreparePostRelationObject(132).
+// The URL path is /relation/<dataID>/<relType> (see relationKey/parseRelationKey in
+// smm2_storage.go) and the body is the same multipart/form-data envelope used for
+// /object/ uploads. On success we reply 204 with an ETag like S3 does.
+func relationHandler(w http.ResponseWriter, r *http.Request) {
+	key := strings.TrimPrefix(r.URL.Path, "/relation/")
+	if key == "" {
+		http.Error(w, "missing key", http.StatusBadRequest)
+		return
+	}
+
+	dataID, relType, ok := parseRelationKey(key)
+	var path string
+	if ok {
+		path = relationPath(dataID, relType)
+	}
+	if path == "" {
+		// Fallback for a key in the OLD flat "prefix_dataID" shape, still in flight from
+		// before this reorg (e.g. a request queued client-side across a server restart).
+		path = filepath.Join(storageDir, sanitizeKey(key))
+	}
+
+	switch r.Method {
+	case http.MethodPost, http.MethodPut:
+		blob, err := extractBlobBody(r)
+		if err != nil {
+			fmt.Printf("[SMM2 Storage] relation %s FAILED reading body: %v\n", key, err)
+			http.Error(w, "bad body", http.StatusBadRequest)
+			return
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			fmt.Printf("[SMM2 Storage] relation %s STORE FAIL (mkdir): %v\n", key, err)
+			http.Error(w, "store failed", http.StatusInternalServerError)
+			return
+		}
+		if err := os.WriteFile(path, blob, 0o644); err != nil {
+			fmt.Printf("[SMM2 Storage] relation %s STORE FAIL: %v\n", key, err)
+			http.Error(w, "store failed", http.StatusInternalServerError)
+			return
+		}
+		// A successful clear-check replay upload (relType=5) counts as a clear
+		// for the course. We don't have a "death" upload path yet, so AttemptCount
+		// and DeathCount stay at zero until the client learns to POST a death
+		// marker. PlayCount is bumped separately by touch_object(22) when the
+		// session opens, so the two counters stay in sync with what the client
+		// actually reports.
+		if relType == 5 {
+			courses.applyPlayed(dataID, 0, 1, 0, 0) // +1 clear
+			fmt.Printf("[SMM2 Storage]   -> replay upload = +1 clear for data_id=%d\n", dataID)
+		}
+		sum := md5.Sum(blob)
+		w.Header().Set("ETag", fmt.Sprintf("%q", hex.EncodeToString(sum[:])))
+		w.Header().Set("Server", "AmazonS3")
+		w.Header().Set("x-amz-request-id", "NEXTENDO0000000000")
+		fmt.Printf("[SMM2 Storage] relation %s <- %d bytes (etag=%x, path=%s)\n", key, len(blob), sum[:4], path)
+		w.WriteHeader(http.StatusNoContent) // 204, like S3
+	case http.MethodGet, http.MethodHead:
+		b, err := os.ReadFile(path)
+		if err != nil {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", contentTypeForPath(path))
+		w.Header().Set("Content-Length", strconv.Itoa(len(b)))
 		if r.Method == http.MethodGet {
 			w.Write(b)
 		}
@@ -278,6 +906,31 @@ func s3PostHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent) // 204, like S3
 }
 
+// extractBlobBody reads the uploaded course blob from a request to /object/<id>.
+// The console was measured sending this as multipart/form-data (not a plain PUT body
+// like the comment at the top of this file assumed "courses are small" for) — a real
+// upload came back as one big multipart envelope, and treating that whole envelope as
+// the level data would have written a corrupt (wrapped-in-boundaries) file. Parse the
+// form and pull out the "file" field when the content-type says multipart; otherwise
+// fall back to reading the raw body (a plain PUT with no form wrapping).
+func extractBlobBody(r *http.Request) ([]byte, error) {
+	ct := r.Header.Get("Content-Type")
+	if !strings.HasPrefix(ct, "multipart/") {
+		return readAllLimited(r, 64<<20)
+	}
+	if err := r.ParseMultipartForm(96 << 20); err != nil {
+		return nil, fmt.Errorf("multipart parse: %w", err)
+	}
+	if f, _, err := r.FormFile("file"); err == nil {
+		defer f.Close()
+		return io.ReadAll(io.LimitReader(f, 96<<20))
+	}
+	if vals := r.MultipartForm.Value["file"]; len(vals) > 0 {
+		return []byte(vals[0]), nil
+	}
+	return nil, fmt.Errorf("multipart body has no \"file\" field (fields=%v)", formFieldNames(r))
+}
+
 // sanitizeKey turns an S3 object key into a safe flat filename.
 func sanitizeKey(key string) string {
 	if key == "" {
@@ -324,3 +977,46 @@ func readAllLimited(r *http.Request, max int64) ([]byte, error) {
 // nowUnix returns the current unix time (isolated so the rest of the file has no
 // direct time import churn).
 func nowUnix() int64 { return time.Now().Unix() }
+
+// thumbnailHandler returns a GET handler that serves a course thumbnail (type 1 =
+// one_screen_thumbnail, type 2 = entire_thumbnail) from smm2_objects/courses/<id>/thumbN.jpg.
+// The console hits this URL after parsing the URL out of each CourseInfo.relation in
+// the search_courses_* (73/74/84) responses; without this handler the GET 404s and
+// no thumbs show up in the Hub. The same chunked + u-header envelope as /object/ is used
+// so a future SCDL-style decrypt path is straightforward to add.
+func thumbnailHandler(relType uint32) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.Error(w, "method", http.StatusMethodNotAllowed)
+			return
+		}
+		idStr := strings.TrimPrefix(r.URL.Path, "/")
+		// strip the leading folder name so the trailing segment is just the data_id
+		if relType == 1 {
+			idStr = strings.TrimPrefix(idStr, "one_screen_thumbnail/")
+		} else {
+			idStr = strings.TrimPrefix(idStr, "entire_thumbnail/")
+		}
+		if i := strings.IndexAny(idStr, "/?"); i >= 0 {
+			idStr = idStr[:i]
+		}
+		dataID, err := strconv.ParseUint(idStr, 10, 64)
+		if err != nil {
+			http.Error(w, "bad data_id", http.StatusBadRequest)
+			return
+		}
+		p := thumbPath(dataID, relType)
+		b, err := os.ReadFile(p)
+		if err != nil {
+			fmt.Printf("[SMM2 Storage] GET thumb%d /%d u=%q -> 404 (%v)\n", relType, dataID, r.Header.Get("u"), err)
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Header().Set("Content-Length", strconv.Itoa(len(b)))
+		fmt.Printf("[SMM2 Storage] GET thumb%d /%d u=%q -> %d bytes\n", relType, dataID, r.Header.Get("u"), len(b))
+		if r.Method == http.MethodGet {
+			w.Write(b)
+		}
+	}
+}

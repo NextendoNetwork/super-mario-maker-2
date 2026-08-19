@@ -1,0 +1,10 @@
+[SMM2 Profiles] 2 perfil(es) maker registrado(s) cargado(s) desde disco
+[SMM2 Replay] loaded fallback get_users(48) template from measured_live.txt
+[SMM2 Replay] loaded 1 response bodies from "measured"
+[SMM2 Replay] missing recommended capture: resp_0x73_m49*.bin
+[SMM2] DataStore(0x73) + Utility(0x6E) registered (1 captured response(s) loaded)
+[SMM2 Secure] listening WSS :60007
+[SMM2 Dashboard] stats API on :8082 (token=false)
+[SMM2 Storage] catalogue chargé: 2 cours, nextID=1002, dir=smm2_objects, url=https://127.0.0.1:60078
+[SMM2 Auth] listening WSS :443 (proxyProto=false, secure URL -> prudps:/address=127.0.0.1;port=60007;CID=1;PID=2;sid=1;stream=10;type=2)
+[SMM2 Storage] listening HTTPS :60078 (blob store)

@@ -1,11 +1,15 @@
-// Command mk8 runs the Mario Kart 8 Deluxe online servers (auth + secure) on the
-// Nextendo NEX stack — our own closed-source NEX implementation, with 
-// the previous stack code. It is the online server
-// servers built on the previous stack.
+// Command smm2 runs the Super Mario Maker 2 online server (DataStore + Utility) on the
+// Nextendo NEX stack. Built as a private server for the Nextendo community: a
+// Nextendo account is REQUIRED to log in (NEXTENDO_REQUIRE_ACCOUNT=1), and all
+// NEX traffic is routed in via sni-router based on the game's TLS SNI.
 //
-// Two NEX servers run in one process:
-//   - auth   (:443)   TicketGranting — LoginEx issues the Kerberos ticket.
-//   - secure (:60003) SecureConnection + matchmaking + NAT-traversal + ranking + utility.
+// One NEX process exposes the protocols SMM2 needs:
+//   - auth    (:443)   TicketGranting — LoginEx issues the Kerberos ticket, with
+//                       Nextendo gates (e-mail verified, single active device).
+//   - secure  (:60007) SecureConnection + matchmaking + NAT-traversal + DataStore + Utility.
+//   - storage (:60078) HTTP — blob/relation download for courses the client plays.
+//
+// See STATE.md for the per-method handler status of the DataStore (0x73) protocol.
 package main
 
 import (
@@ -133,6 +137,7 @@ func main() {
 	// phantom lobbies "searching" for a player who is long gone, and matchmaking can hand
 	// those dead sessions to real players.
 	secureEndpoint.OnDisconnect = func(c *nex.Connection) {
+		fmt.Printf("[SMM2 Secure] disconnected pid=%d id=%d addr=%s at %s\n", c.PID, c.ID, c.RemoteAddr, time.Now().Format("15:04:05.000"))
 		mm.RemovePlayer(c.PID)
 	}
 	secureServer := nex.NewServer(secureEndpoint)
@@ -329,7 +334,7 @@ func anonymousPID(username string) uint64 {
 
 func logRMC(tag string) func(*nex.Connection, *nex.RMCMessage) {
 	return func(c *nex.Connection, req *nex.RMCMessage) {
-		fmt.Printf("[SMM2 %s] pid=%d proto=%#x method=%d call=%d\n", tag, c.PID, req.Protocol, req.Method, req.CallID)
+		fmt.Printf("[%s] [SMM2 %s] pid=%d proto=%#x method=%d call=%d\n", time.Now().Format("15:04:05.000"), tag, c.PID, req.Protocol, req.Method, req.CallID)
 	}
 }
 
