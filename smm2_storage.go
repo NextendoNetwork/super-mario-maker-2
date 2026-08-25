@@ -38,7 +38,7 @@ import (
 var (
 	storagePort = envOrInt("STORAGE_PORT", 60078)
 	// storageURL is the PUBLIC base the console dials for blob transfer. Locally it is
-	// the game host itself; on the server set STORAGE_URL to the routed https origin.
+	// the game host itself; on the VPS set STORAGE_URL to the routed https origin.
 	storageURL = envOr("STORAGE_URL", fmt.Sprintf("https://%s:%d", nextendoHost, storagePort))
 	// storageHostPort is the scheme-less host:port the console POSTs uploads to (the
 	// measured S3 responses carry a scheme-less host and the console prepends https://).

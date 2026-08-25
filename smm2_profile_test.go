@@ -16,11 +16,11 @@ import (
 // top-level length that matches the body (a wrong length desyncs SMM2's parser).
 func TestDynamicProfilePatch(t *testing.T) {
 	s := nex.NewSwitchSettings(accessKey, nexVersion)
-	const testPID = 1800000006
-	const testName = "a player"
+	const testPID = 1001
+	const testName = "Tester"
 
 	// sync_user_profile(49): [pid u64][name string][rest] — the OWN profile.
-	m49, err := os.ReadFile("measured/a response")
+	m49, err := os.ReadFile("measured/resp_0x73_m49.bin")
 	if err != nil {
 		t.Fatalf("read m49: %v", err)
 	}
@@ -35,7 +35,7 @@ func TestDynamicProfilePatch(t *testing.T) {
 	}
 
 	// get_users(48): carve a UserInfo shell, patch [pid u64][code string][name string].
-	m48, err := os.ReadFile("measured/a response")
+	m48, err := os.ReadFile("measured/resp_0x73_m48.bin")
 	if err != nil {
 		t.Fatalf("read m48: %v", err)
 	}
@@ -53,8 +53,8 @@ func TestDynamicProfilePatch(t *testing.T) {
 	if got := in.String(); got != testName {
 		t.Errorf("user name = %q, want %q", got, testName)
 	}
-	if code == "EXAMPLE00" {
-		t.Errorf("maker code still the measured player's: %q", code)
+	if code != makerCode(testPID) {
+		t.Errorf("maker code = %q, want derived %q", code, makerCode(testPID))
 	}
 }
 
