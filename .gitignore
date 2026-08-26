@@ -5,3 +5,7 @@
 cert.pem
 key.pem
 nextendo_secret.key
+
+# Binaires compiles (20 Mo) : jamais dans le depot
+/smm2
+/smm2-kazu

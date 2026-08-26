@@ -106,8 +106,8 @@ func patchSyncProfile(s *nex.Settings, tmpl []byte, pid uint64, pseudo string) [
 	}
 	version := tmpl[0]
 	in := nex.NewStreamIn(tmpl[5:], s)
-	_ = in.PID()      // old pid
-	_ = in.String()   // old username
+	_ = in.PID()    // old pid
+	_ = in.String() // old username
 	rest := in.ReadAll()
 
 	out := nex.NewStreamOut(s)
@@ -125,9 +125,9 @@ func patchUserInfo(s *nex.Settings, tmpl []byte, pid uint64, name string) []byte
 	}
 	version := tmpl[0]
 	in := nex.NewStreamIn(tmpl[5:], s)
-	_ = in.PID()      // old pid
-	_ = in.String()   // old maker code
-	_ = in.String()   // old name
+	_ = in.PID()    // old pid
+	_ = in.String() // old maker code
+	_ = in.String() // old name
 	rest := in.ReadAll()
 
 	out := nex.NewStreamOut(s)

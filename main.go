@@ -1,5 +1,5 @@
 // Command mk8 runs the Mario Kart 8 Deluxe online servers (auth + secure) on the
-// Nextendo NEX stack — our own closed-source NEX implementation, with 
+// Nextendo NEX stack — our own closed-source NEX implementation, with
 // the previous stack code. It is the online server
 // servers built on the previous stack.
 //
@@ -106,6 +106,32 @@ func main() {
 	secureEndpoint.SetSecureAccount(securePassword, securePID)
 
 	mm := nex.NewMatchmaking()
+
+	// ESSAI DU 2026-08-24 : repondre reellement a FindMatchmakeSessionByParticipant
+	// (0x6D.0x33) au lieu d'une liste vide.
+	//
+	// Mesure prealable : en versus, chaque joueur appelle 0x33, recoit une liste vide,
+	// puis cree SA PROPRE session (gid=1 pour l'un, gid=2 pour l'autre). Ils ne se
+	// rencontrent jamais. Le NAT traversal et le 0x15 qui suivent se deroulent
+	// normalement — il n'y a simplement personne en face.
+	//
+	// Le drapeau est commutable par fichier pour pouvoir revenir en arriere sans
+	// redeploiement, parce que ce changement touche le multijoueur de tous les joueurs
+	// connectes et non un ecran isole :
+	//   echo 0 > /opt/smm2/smm2_mm.on   -> comportement precedent
+	//
+	// findByParticipant journalise les PID demandes, donc l'essai renseigne meme s'il
+	// echoue : si SMM2 demande son PROPRE PID, la question est « suis-je deja en
+	// session ? » et la liste vide etait la bonne reponse ; s'il demande d'autres PID,
+	// c'est bien la voie de jonction.
+	mm.FindByParticipantEnabled = drapeauFichier("/data/smm2_mm.on", true)
+	// Et surtout : une liste de PID vide veut dire « toutes les sessions ouvertes ».
+	// C'est ce que SMM2 envoie en cooperatif (mesure : `findByParticipant(pids=[])`), et
+	// sans cela le drapeau ci-dessus ne sert a rien — l'ancien code bouclait sur une
+	// liste vide et rendait zero session, donc deux joueurs entrant en meme temps
+	// creaient chacun sa salle.
+	mm.FindByParticipantVideVeutDireToutes = mm.FindByParticipantEnabled
+	fmt.Printf("[MM] FindByParticipant repond reellement : %v (liste vide = toutes)\n", mm.FindByParticipantEnabled)
 	secureEndpoint.Register(nex.ProtocolSecureConnection, nex.SecureConnectionHandler())
 	secureEndpoint.Register(nex.ProtocolMatchmakeExtension, mm.ExtensionHandler())
 	secureEndpoint.Register(nex.ProtocolMatchMaking, mm.MatchMakingHandler())
@@ -263,8 +289,8 @@ func resolveUser(username string, extraData []byte) (uint64, []byte, bool) {
 // revokedNexPayloads lists leaked nex_token payloads (pid.username.expiry) that must be
 // rejected even though their HMAC is valid, without rotating the shared secret. Populated
 // per deployment.
-var revokedNexPayloads = map[string]bool{
-}
+var revokedNexPayloads = map[string]bool{}
+
 // nextendoPIDFromToken validates a "nx2.<b64(pid.username.expiry)>.<b64(hmac)>"
 // token signed by the account service (HMAC-SHA256, "nex:" prefix).
 func nextendoPIDFromToken(s string) (uint64, bool) {

@@ -7,6 +7,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"strings"
 
 	nex "github.com/NextendoNetwork/nextendo-nex"
 )
@@ -107,7 +108,8 @@ func smm2PrepareRelationUpload(conn *nex.Connection, req *nex.RMCMessage) *nex.R
 		tmpl = capturedResponses[replayKey(0x73, 132)] // fallback: any measured 132
 	}
 	if tmpl == nil {
-		return nex.NewRMCError(s, 0x73, req.CallID, 0x80690004)
+		// Pas de capture : on construit la reponse au lieu d'abandonner la publication.
+		return smm2PrepareRelationUploadDynamique(conn, req)
 	}
 	body := rewriteRelationDescriptor(tmpl, relType, reqSize, conn.PID)
 	fmt.Printf("[SMM2 Storage] prepare-relation(132) type=%d(%s) size=0x%x pid=%d -> réécrit (%do)\n", relType, m132TypeName[relType], reqSize, conn.PID, len(body))
@@ -183,5 +185,257 @@ func smm2PrepareGetObject(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMes
 		fmt.Printf("[SMM2 Storage] prepare_get(25) data_id=%d inconnu -> replay measured (boot)\n", dataID)
 		return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, body)
 	}
+	// On DIT pourquoi on refuse. Sans cette ligne, la methode 25 echouait en silence et
+	// le journal ne montrait rien du tout — on voyait « erreur de connexion » a l'ecran
+	// et aucune trace cote serveur, ce qui est le pire cas pour diagnostiquer.
+	fmt.Printf("[SMM2 Storage] prepare_get(25) data_id=%d INTROUVABLE dans le catalogue\n", dataID)
 	return nex.NewRMCError(s, 0x73, req.CallID, 0x80690004) // DataStore::NotFound
+}
+
+// smm2GetReqGetInfoHeadersInfo (134) : les en-tetes HTTP a employer pour telecharger,
+// et leur duree de validite.
+//
+// Requete : un Uint8, le type de donnee visee.
+// Reponse : List<DataStoreKeyValue> puis Uint32 (expiration en secondes).
+//
+// Notre magasin n'exige aucune en-tete particuliere : la liste est vide, et c'est la
+// verite plutot qu'un remplissage. L'expiration est large — les URL que nous servons ne
+// sont pas signees et ne perimeront pas.
+func smm2GetReqGetInfoHeadersInfo(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
+	s := conn.Settings
+	in := nex.NewStreamIn(req.Body, s)
+	typeDonnee := in.U8()
+
+	// POUR LES IMAGES DE COMMENTAIRE (type 10), LA LISTE VIDE NE SUFFIT PAS.
+	//
+	// Mesure du 2026-08-24 : la console redemande ces en-tetes toutes les 2,08 secondes,
+	// indefiniment, et ne telecharge JAMAIS l'image — c'est le « cadre qui charge sans
+	// fin » a l'ecran. La meme reponse vide convient pourtant aux vignettes de niveau
+	// (type 2), qui arrivent sans probleme : ce n'est donc pas la forme qui cloche.
+	//
+	// Le nom de la structure le laissait entendre : kinnay l'appelle
+	// CommentPictureReqGetInfo *WithoutHeaders*. La fiche du commentaire est privee
+	// d'en-tetes A DESSEIN, et le jeu vient les chercher ici. Lui rendre une liste vide,
+	// c'est promettre de les donner et ne rien donner.
+	//
+	// On ignore lesquelles il attend, d'ou un commutateur :
+	//   echo 0 > /opt/smm2/smm2_134.forme   -> aucune (comportement precedent)
+	//   echo 1 > ...                        -> Accept: */*            (defaut)
+	//   echo 2 > ...                        -> Host: <notre serveur>
+	//   echo 3 > ...                        -> les deux
+	type entete struct{ cle, val string }
+	var entetes []entete
+	if typeDonnee == 10 {
+		switch formeEssai(134, 1) {
+		case 1:
+			entetes = []entete{{"Accept", "*/*"}}
+		case 2:
+			entetes = []entete{{"Host", storageHote()}}
+		case 3:
+			entetes = []entete{{"Accept", "*/*"}, {"Host", storageHote()}}
+		}
+	}
+
+	champs := nex.NewStreamOut(s)
+	champs.U32(uint32(len(entetes)))
+	for _, e := range entetes {
+		champs.String(e.cle)
+		champs.String(e.val)
+	}
+	champs.U32(3600) // validite : une heure
+
+	out := nex.NewStreamOut(s)
+	if s.StructHeader {
+		out.U8(0)
+		out.Buffer(champs.Bytes())
+	} else {
+		out.Write(champs.Bytes())
+	}
+
+	fmt.Printf("[SMM2 Storage] get_headers_info(134) type=%d -> %d en-tete(s), 3600s\n", typeDonnee, len(entetes))
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
+}
+
+// smm2PreparePostObjectCourse (66) : la variante SMM2 de la preparation d'envoi.
+//
+// Kazu avait implemente la 24, la version GENERIQUE de DataStore. SMM2 n'appelle pas
+// celle-la pour publier un niveau : il appelle la 66, avec son propre parametre
+// PreparePostCourseParam — deux chaines, puis une longue serie d'entiers, un qBuffer et
+// une liste de chaines. Structure relevee dans la documentation PretendoNetwork ; tous
+// ses champs y sont marques « Unknown », mais l'ORDRE et les TYPES sont fermes, et
+// c'est tout ce qu'il faut pour la traverser sans se decaler.
+//
+// La REPONSE, elle, est la meme que pour la 24 : DataStoreReqPostInfo. On reutilise
+// donc le stockage existant — data_id alloue, URL vers le magasin d'objets — sans rien
+// reecrire.
+//
+// Ce qu'on ne fait pas encore : exploiter les champs du parametre. Le nom du niveau, sa
+// description et ses etiquettes sont dedans, et ils finiront dans le catalogue. Pour
+// l'instant on veut d'abord voir un fichier arriver sur le disque.
+func smm2PreparePostObjectCourse(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
+	s := conn.Settings
+	in := nex.NewStreamIn(req.Body, s)
+	_ = in.U8() // version de la structure
+	p := in.Substream()
+
+	nom := p.String()  // premiere chaine : le nom saisi par le joueur
+	desc := p.String() // seconde : la description
+	taille := p.U32()  // taille annoncee du fichier
+	_ = p.Bool()
+	_ = p.U8()
+	_ = p.U8()
+	for i := 0; i < 4; i++ {
+		_ = p.U32()
+	}
+	meta := p.QBuffer()
+	_ = p.U8()
+	_ = p.U32()
+	_ = p.U16()
+	_ = p.U16()
+	_ = p.Bool()
+	_ = p.U32()
+	_ = p.U32()
+	etiquettes := nex.ReadList(p, func(i *nex.StreamIn) string { return i.String() })
+
+	if err := p.Err(); err != nil {
+		// Mieux vaut refuser franchement que d'allouer un emplacement pour un niveau
+		// qu'on a mal lu : un catalogue avec des entrees fantomes serait pire.
+		fmt.Printf("[SMM2 Storage] prepare_post_course(66) pid=%d : parametre illisible (%v), %d octets\n",
+			conn.PID, err, len(req.Body))
+		return nex.NewRMCError(s, 0x73, req.CallID, 0x00690002) // DataStore::InvalidArgument
+	}
+
+	id := courses.alloc(conn.PID, nom, 0, meta, etiquettes, taille)
+	courses.mu.Lock()
+	if m := courses.byID[id]; m != nil {
+		m.Description = desc
+	}
+	courses.mu.Unlock()
+	url := fmt.Sprintf("%s/object/%d", storageURL, id)
+
+	body := nex.NewStreamOut(s)
+	body.U64(id)
+	body.String(url)
+	body.U32(0) // pas d'en-tetes
+	body.U32(0) // pas de formulaire : simple PUT
+	body.Buffer(courses.rootCA)
+	resp := frameStruct(s, 0, body.Bytes())
+
+	fmt.Printf("[SMM2 Storage] prepare_post_course(66) pid=%d nom=%q desc=%q taille=%d etiquettes=%v -> data_id=%d\n",
+		conn.PID, nom, desc, taille, etiquettes, id)
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, resp)
+}
+
+// smm2PrepareRelationUploadDynamique (132) construit la reponse SANS capture.
+//
+// Un niveau ne voyage pas seul : SMM2 televerse aussi ses miniatures et l'enregistrement
+// de la partie de validation — d'ou les quatre appels consecutifs a cette methode juste
+// apres l'envoi du niveau. Sans reponse valide, le jeu annule TOUTE la publication,
+// meme si le fichier principal est deja arrive sur le disque. C'est exactement ce qu'on
+// observait : 376 971 octets ecrits, et « impossible de publier ».
+//
+// Structures relevees dans la documentation PretendoNetwork :
+//
+//	PreparePostRelationObjectParam : String, 4 x Uint32, List<String>
+//	RelationObjectReqPostInfo      : String(data_id), String(url), List, List, Buffer
+//
+// Piege a noter : ici le data_id est une CHAINE, alors que la methode 66 le rend en
+// Uint64. Meme notion, deux encodages — les melanger casse la lecture du client.
+func smm2PrepareRelationUploadDynamique(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
+	s := conn.Settings
+	in := nex.NewStreamIn(req.Body, s)
+	_ = in.U8()
+	p := in.Substream()
+
+	parent := p.String() // data_id du niveau auquel ce fichier se rattache
+	relType := p.U32()   // type : miniature, enregistrement...
+	taille := p.U32()
+	_ = p.U32()
+	_ = p.U32()
+	_ = nex.ReadList(p, func(i *nex.StreamIn) string { return i.String() })
+
+	if err := p.Err(); err != nil {
+		fmt.Printf("[SMM2 Storage] prepare-relation(132) pid=%d : parametre illisible (%v)\n", conn.PID, err)
+		return nex.NewRMCError(s, 0x73, req.CallID, 0x00690002)
+	}
+
+	// Un identifiant propre pour le fichier rattache, distinct du niveau lui-meme.
+	id := courses.alloc(conn.PID, fmt.Sprintf("rel-%s-%d", parent, relType), uint16(relType), nil, nil, taille)
+	url := fmt.Sprintf("%s/object/%d", storageURL, id)
+
+	body := nex.NewStreamOut(s)
+	body.String(fmt.Sprintf("%d", id)) // data_id EN CHAINE, contrairement a la 66
+	body.String(url)
+	body.U32(0) // headers
+	body.U32(0) // form fields
+	body.Buffer(courses.rootCA)
+	resp := frameStruct(s, 0, body.Bytes())
+
+	fmt.Printf("[SMM2 Storage] prepare-relation(132) pid=%d parent=%s type=%d taille=%d -> data_id=%d\n",
+		conn.PID, parent, relType, taille, id)
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, resp)
+}
+
+// smm2CompletePostObjectsCourse (68) : la confirmation finale de la publication.
+//
+// Sans elle, tout arrivait sur le disque et RIEN n'etait marque pret : le jeu affichait
+// « publie » et le niveau restait invisible, en etat « ready: false ». Il n'y avait pas
+// d'erreur a chercher — juste une etape qu'on repondait a vide.
+//
+// Structure du parametre (documentation PretendoNetwork) :
+//
+//	5 x String · Uint64 · PreparePostCourseParam
+//
+// Les cinq chaines sont les identifiants des objets televerses — le niveau et ses
+// fichiers rattaches. C'est ce qui relie les cinq blobs en une seule publication.
+func smm2CompletePostObjectsCourse(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
+	s := conn.Settings
+	in := nex.NewStreamIn(req.Body, s)
+	_ = in.U8()
+	p := in.Substream()
+
+	var ids []string
+	for i := 0; i < 5; i++ {
+		if id := p.String(); id != "" {
+			ids = append(ids, id)
+		}
+	}
+
+	// Apres les cinq chaines vient un Uint64 : c'est le data_id du NIVEAU lui-meme.
+	// Je le sautais, et le resultat se voyait dans le catalogue — les quatre fichiers
+	// rattaches passaient a « pret », le niveau restait a « faux ». La console ne le
+	// cite pas parmi les chaines parce qu'il a son propre champ.
+	niveau := p.U64()
+
+	if err := p.Err(); err != nil {
+		fmt.Printf("[SMM2 Storage] complete_post_course(68) pid=%d : parametre illisible (%v)\n", conn.PID, err)
+		return nex.NewRMCError(s, 0x73, req.CallID, 0x00690002)
+	}
+	if niveau != 0 {
+		courses.complete(niveau, true)
+	}
+
+	// Chaque objet cite passe a « pret ». On ne devine pas : on marque exactement ce
+	// que la console nous dit avoir televerse.
+	n := 0
+	for _, id := range ids {
+		var v uint64
+		if _, err := fmt.Sscanf(id, "%d", &v); err == nil && v != 0 {
+			courses.complete(v, true)
+			n++
+		}
+	}
+
+	fmt.Printf("[SMM2 Storage] complete_post_course(68) pid=%d -> niveau=%d + %d fichier(s) rattache(s) %v\n",
+		conn.PID, niveau, n, ids)
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
+}
+
+// storageHote rend l'hote du magasin d'objets, sans schema ni chemin.
+func storageHote() string {
+	h := strings.TrimPrefix(strings.TrimPrefix(storageURL, "https://"), "http://")
+	if i := strings.IndexByte(h, '/'); i >= 0 {
+		h = h[:i]
+	}
+	return h
 }
