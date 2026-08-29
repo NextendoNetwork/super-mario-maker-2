@@ -156,6 +156,10 @@ func smm2DataStoreHandler() nex.RMCHandler {
 		case 91:
 			// PostCommentText : on l'enregistre, meme si on ne sait pas encore le rendre.
 			return smm2PostCommentText(conn, req)
+		case 92:
+			// PostCommentStamp : le commentaire TAMPON. Il tombait sur le repli
+			// generique, donc rien n'etait garde.
+			return smm2PostCommentStamp(conn, req)
 		case 61:
 			// CanPostRatingAndComment : posee juste avant de lancer la partie.
 			return smm2CanPostRatingAndComment(conn, req)

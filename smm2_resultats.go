@@ -131,6 +131,9 @@ func (m *magasinResultats) lire(dataID uint64) resultatNiveau {
 //
 // C'est enregistrer qui le sait, parce que c'est le seul endroit ou un record change de
 // main. Le menage se fait dehors, verrou relache.
+// tempsAbsent : ce que le jeu envoie a la place d'un chrono quand il n'en a pas.
+const tempsAbsent uint32 = 0xFFFFFFFF
+
 func (m *magasinResultats) enregistrer(dataID, pid uint64, tentatives, ms uint32, termine bool, rediff string) (aJeter uint64) {
 	m.mu.Lock()
 	r, ok := m.parNiv[dataID]
@@ -157,7 +160,14 @@ func (m *magasinResultats) enregistrer(dataID, pid uint64, tentatives, ms uint32
 			j.PremieresReussites++
 		}
 		// Un temps de zero n'est pas un record : c'est un champ qu'on n'a pas su lire.
-		if ms > 0 && (r.RecordMs == 0 || ms < r.RecordMs) {
+		//
+		// 0xFFFFFFFF non plus : c'est la valeur « pas de donnee » que le jeu envoie quand
+		// la partie s'est terminee sans chrono. Mesuree le 2026-08-29, sur des parties
+		// abandonnees — le journal affichait « temps=4294967295ms ». Elle ne pouvait pas
+		// nuire tant qu'un record existait, puisque tout temps reel lui est inferieur ;
+		// mais sur un niveau encore vierge elle se serait installee comme PREMIER record
+		// du monde, affiche a l'ecran comme quarante-neuf jours.
+		if ms > 0 && ms != tempsAbsent && (r.RecordMs == 0 || ms < r.RecordMs) {
 			// Le record change de main : on le retire a l'ancien avant de le donner.
 			if r.RecordPID != 0 && r.RecordPID != pid {
 				if ancien, ok := m.parJoueur[r.RecordPID]; ok && ancien.Records > 0 {

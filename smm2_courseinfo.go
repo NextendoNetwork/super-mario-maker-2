@@ -462,8 +462,35 @@ func smm2CanPostRatingAndComment(conn *nex.Connection, req *nex.RMCMessage) *nex
 	// Sans consequence tant que la reponse etait vide de toute facon. Mais le jour ou l'on
 	// saura enregistrer les morts, on les aurait cherchees pour le niveau zero et rendu une
 	// liste vide en croyant que personne n'etait mort.
+	// LE CORPS BRUT, parce que deux lectures ont deja echoue. Le parametre a d'abord ete
+	// lu comme une structure encadree, puis comme un Uint64 nu — a la maniere de
+	// l'implementation de reference — et le journal affiche « data_id=0 » dans les deux
+	// cas. Continuer a proposer des formes serait la troisieme supposition d'affilee ;
+	// on regarde les octets.
+	fmt.Printf("[SMM2 Courses] get_death_positions(103) corps brut len=%d: %x\n", len(req.Body), req.Body)
+
+	// LE PARAMETRE EST BIEN UNE STRUCTURE ENCADREE, et la lecture d'origine avait raison.
+	//
+	// Je l'avais changee en Uint64 nu parce que l'implementation de reference decode ainsi,
+	// et parce que le journal affichait « data_id=0 ». Les octets, mesures ensuite, disent
+	// autre chose :
+	//
+	//	000c000000 6f0a000000000000 03000000
+	//	 ^version   ^data_id 2671    ^un u32 de sens inconnu
+	//
+	// Deux suppositions de suite sur une forme qu'un seul volcado suffisait a etablir.
+	//
+	// Le « data_id=0 » n'est PAS explique pour autant : certains appels semblent porter un
+	// corps different. Le volcado ci-dessus reste en place pour l'attraper.
 	in := nex.NewStreamIn(req.Body, s)
-	dataID := in.U64()
+	var dataID uint64
+	if s.StructHeader {
+		_ = in.U8()
+		sous := in.Substream()
+		dataID = sous.U64()
+	} else {
+		dataID = in.U64()
+	}
 
 	// LES DEUX Uint32 SONT UNE INCONNUE, ET LEUR VALEUR COMPTE.
 	//

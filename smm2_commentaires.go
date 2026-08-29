@@ -41,6 +41,50 @@ type commentaire struct {
 	// rendu en JPEG — et c'est le second que le jeu affiche.
 	Image     uint64 `json:"image,omitempty"`
 	TailleImg uint32 `json:"taille_img,omitempty"`
+	// Tampon : l'identifiant de l'image de reaction d'un commentaire TAMPON, zero pour
+	// les autres. La methode 92 qui le porte tombait sur le repli generique : le jeu
+	// annoncait « publie » et le tampon disparaissait.
+	Tampon uint16 `json:"tampon,omitempty"`
+	// X, Y : l'endroit du niveau ou le commentaire est pose. Les DEUX methodes les
+	// portent, texte comme tampon, dans la meme structure de parametre — et nous les
+	// jetions dans les deux cas. Un commentaire sans position n'est pas un commentaire
+	// de SMM2 : le jeu les affiche a l'endroit ou ils ont ete laisses.
+	X         uint16 `json:"x,omitempty"`
+	Y         uint16 `json:"y,omitempty"`
+	SousMonde bool   `json:"sous_monde,omitempty"`
+}
+
+// posteCommentaire : les champs fixes que portent les methodes 91 et 92, a l'identique.
+//
+// Vingt-deux octets, mesures sur une vraie console le 2026-08-29 : la longueur annoncee
+// dans l'en-tete valait exactement 0x16, et les neuf champs ci-dessous la remplissent
+// sans reste. C'est ce qui a permis de lire un tampon pose en jeu — niveau 2636, X 2513,
+// image 6 — au lieu de le deviner.
+type posteCommentaire struct {
+	DataID        uint64
+	Unk1          uint8
+	X, Y          uint16
+	SousMonde     bool
+	Reaction      uint8
+	Unk2          uint16
+	ReussiteExige bool
+	Unk3          uint32
+}
+
+// lirePosteCommentaire lit ces champs. Rend faux si le parametre est illisible : mieux
+// vaut enregistrer un commentaire sans position que refuser de l'enregistrer.
+func lirePosteCommentaire(p *nex.StreamIn) (posteCommentaire, bool) {
+	var c posteCommentaire
+	c.DataID = p.U64()
+	c.Unk1 = p.U8()
+	c.X = p.U16()
+	c.Y = p.U16()
+	c.SousMonde = p.Bool()
+	c.Reaction = p.U8()
+	c.Unk2 = p.U16()
+	c.ReussiteExige = p.Bool()
+	c.Unk3 = p.U32()
+	return c, p.Err() == nil
 }
 
 type magasinCommentaires struct {
@@ -153,15 +197,24 @@ func smm2PostCommentText(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMess
 		_ = in.U8()
 		p = in.Substream()
 	}
-	dataID := p.U64()
+	// Le parametre de la 91 est le MEME que celui de la 92 : on y lit donc aussi la
+	// position. Elle etait jetee, alors que le jeu affiche chaque commentaire a l'endroit
+	// exact ou il a ete laisse.
+	//
+	// Le TEXTE, lui, continue d'etre pris par derniereChaine : c'est une heuristique, mais
+	// une heuristique qui marche depuis le premier jour, et on ne remplace pas une chose
+	// verifiee par l'usage au motif qu'on vient de comprendre la structure d'a cote.
+	champs, ok := lirePosteCommentaire(p)
+	dataID := champs.DataID
 	texte := derniereChaine(req.Body)
 
 	n := commentaires.ajouter(commentaire{
 		DataID: dataID, PID: conn.PID, Texte: texte, Quand: nowUnix(),
+		X: champs.X, Y: champs.Y, SousMonde: champs.SousMonde,
 	})
 
-	fmt.Printf("[SMM2 Commentaires] post_comment_text(91) pid=%d data_id=%d texte=%q -> %d sur ce niveau\n",
-		conn.PID, dataID, texte, n)
+	fmt.Printf("[SMM2 Commentaires] post_comment_text(91) pid=%d data_id=%d texte=%q position=(%d,%d) lisible=%v -> %d sur ce niveau\n",
+		conn.PID, dataID, texte, champs.X, champs.Y, ok, n)
 
 	// LA REPONSE EST UN Uint32 A ZERO, ET C'EST MESURE, PAS DEDUIT.
 	//
@@ -497,4 +550,48 @@ func typeDessinSuivant() (uint8, uint8) {
 	c := combinaisonsDessin[n]
 	fmt.Printf("[SMM2 Commentaires]   DESSIN -> combinaison %d = (%d,%d)\n", n, c[0], c[1])
 	return c[0], c[1]
+}
+
+// smm2PostCommentStamp : la methode 92, le commentaire TAMPON.
+//
+// Elle tombait sur le repli generique — « UNCAPTURED 0x73.92 » dans le journal — donc le
+// jeu affichait « publie » et rien n'etait garde. CLAUDE.md donnait pourtant les
+// commentaires, texte ET tampons, pour fonctionnels : c'etait vrai de l'affichage, pas de
+// l'enregistrement.
+//
+// Le parametre est celui de la 91, suivi d'une SECONDE structure de deux octets portant
+// l'identifiant de l'image. On repond comme la 91 — un Uint32 a zero, valeur mesuree et
+// non deduite ; l'analogie avec PostPlayResult avait deja coute une fonctionnalite.
+func smm2PostCommentStamp(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
+	s := conn.Settings
+	in := nex.NewStreamIn(req.Body, s)
+	p := in
+	if s.StructHeader {
+		_ = in.U8()
+		p = in.Substream()
+	}
+	champs, ok := lirePosteCommentaire(p)
+
+	// La seconde structure, au niveau du flux PRINCIPAL et non du sous-flux : elle suit le
+	// parametre, elle n'est pas dedans.
+	var tampon uint16
+	if s.StructHeader {
+		_ = in.U8()
+		q := in.Substream()
+		tampon = q.U16()
+	} else {
+		tampon = in.U16()
+	}
+
+	n := commentaires.ajouter(commentaire{
+		DataID: champs.DataID, PID: conn.PID, Quand: nowUnix(),
+		Tampon: tampon, X: champs.X, Y: champs.Y, SousMonde: champs.SousMonde,
+	})
+
+	fmt.Printf("[SMM2 Commentaires] post_comment_stamp(92) pid=%d data_id=%d tampon=%d position=(%d,%d) sous_monde=%v lisible=%v -> %d sur ce niveau\n",
+		conn.PID, champs.DataID, tampon, champs.X, champs.Y, champs.SousMonde, ok, n)
+
+	out := nex.NewStreamOut(s)
+	out.U32(0)
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
 }
