@@ -190,6 +190,27 @@ func smm2DataStoreHandler() nex.RMCHandler {
 			// lieu d'abandonner. La structure du parametre vient de la documentation
 			// PretendoNetwork, celle de la reponse est la meme que pour la 24.
 			return smm2PreparePostObjectCourse(conn, req)
+		case 78:
+			// SearchCourses pour le COOPERATIF. Voir smm2_recherche.go : c'est elle qui
+			// faisait dire « donnees du niveau corrompues ».
+			return smm2SearchCoursesMultijoueur(conn, req)
+		case 117:
+			// LE PREMIER APPEL DU MULTIJOUEUR, et le seul que la console emette.
+			//
+			// Mesure du 2026-08-29 : sur dix-sept appels, tous sont des 117 — jamais un
+			// 118 a 122. Le corps est VIDE (le repli generique n'imprime que les corps
+			// non vides et n'a jamais rien imprime), donc la methode ne prend aucun
+			// parametre. La console l'appelle deux fois a cinq secondes d'intervalle,
+			// abandonne, et retombe sur l'appariement (0x6D methode 40).
+			//
+			// Aucune source publique ne la nomme : ocw-server saute de 116 a 123, et son
+			// auteur avait un mod de client et des annees de service sans l'implementer.
+			// On ne peut donc que MESURER, d'ou la sonde — l'enveloppe se change par un
+			// `echo` dans /opt/smm2/smm2_117.forme, « auto » pour balayer les neuf.
+			//
+			// Defaut : la forme 1, struct{ liste vide }, celle qui avait debloque la 115.
+			// Le repli generique servait la forme 6, liste nue, qui echoue.
+			return smm2CoursesVersus(conn, req)
 		case 104:
 			// PostRankingInfo : le jeu annonce un resultat de classement. La forme du
 			// parametre — CourseId puis trois Uint8 — correspond aux onze octets mesures.

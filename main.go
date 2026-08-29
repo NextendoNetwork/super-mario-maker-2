@@ -146,6 +146,8 @@ func main() {
 	// aurait pu etre ecrite pendant qu'une requete la lisait. Un defaut de ce genre ne se
 	// voit qu'une fois sur mille demarrages, et jamais quand on le cherche.
 	nex.UtilityReglagesJeu = smm2ReglagesEntiers
+	// Les records du mode sans fin, pour le profil du joueur.
+	nex.SMM2RecordsEndlessFn = endless.recordsDe
 
 	setupSMM2InitReplay(secureEndpoint)
 	// Pia 5.19 type-8 keepalive: ACK it so SMM2's online menu doesn't soft-lock.

@@ -36,6 +36,11 @@ type partieEndless struct {
 	// suivant » de « le joueur vient de MOURIR et recommence le meme » — c'est le seul
 	// signal dont on dispose pour decompter une vie, le jeu ne dit pas « je suis mort ».
 	CoursActuel uint64 `json:"cours_actuel"`
+	// Record : le MEILLEUR nombre de niveaux enchaines dans cette difficulte, toutes
+	// parties confondues. Il survit a la fin d'une partie — c'est ce qui le distingue de
+	// Reussites, remis a zero a chaque nouvelle tentative — et c'est lui que le profil
+	// affiche comme score du mode sans fin.
+	Record uint32 `json:"record,omitempty"`
 }
 
 type magasinEndless struct {
@@ -151,6 +156,9 @@ func (m *magasinEndless) reussirCours(pid uint64, difficulte, viesGagnees, piece
 		e.Vies += viesGagnees
 	}
 	e.Reussites++
+	if e.Reussites > e.Record {
+		e.Record = e.Reussites
+	}
 	e.Pieces = pieces
 	e.PointsScore = points
 	e.CoursActuel = 0 // le niveau est fini : le suivant ne sera pas une mort
@@ -172,7 +180,36 @@ func (m *magasinEndless) terminer(pid uint64, difficulte uint8) (uint8, uint32) 
 	}
 	e := &p[difficulte]
 	vies, reussites := e.Vies, e.Reussites
-	*e = partieEndless{}
+	// Le RECORD survit a la remise a zero. L'effacer avec le reste rendait le mode sans
+	// fin incapable de garder quoi que ce soit : chaque partie repartait de zero et le
+	// profil n'avait jamais rien a montrer.
+	record := e.Record
+	if reussites > record {
+		record = reussites
+	}
+	*e = partieEndless{Record: record}
 	m.ecrireLocked()
 	return vies, reussites
+}
+
+// recordsDe rend les quatre records du mode sans fin, pour le profil.
+//
+// Le record d'une difficulte est le meilleur enchainement jamais realise ; on prend aussi
+// en compte la partie EN COURS, sinon un joueur qui bat son record et consulte son profil
+// sans avoir termine verrait encore l'ancien.
+func (m *magasinEndless) recordsDe(pid uint64) [4]uint32 {
+	var out [4]uint32
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	p, ok := m.parPID[pid]
+	if !ok {
+		return out
+	}
+	for d := 0; d < 4; d++ {
+		out[d] = p[d].Record
+		if p[d].Reussites > out[d] {
+			out[d] = p[d].Reussites
+		}
+	}
+	return out
 }

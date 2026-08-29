@@ -454,34 +454,14 @@ func estFichierRattache(nom string) bool {
 func smm2CanPostRatingAndComment(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
 	s := conn.Settings
 
-	// Le parametre est un Uint64 NU, pas une structure : l'implementation de reference le
-	// decode directement, sans en-tete ni longueur. Nous lisions une version puis un
-	// sous-flux, donc nous lisions le data_id la ou il n'etait pas — le journal affichait
-	// « data_id=0 » a chaque appel, pour tous les niveaux.
-	//
-	// Sans consequence tant que la reponse etait vide de toute facon. Mais le jour ou l'on
-	// saura enregistrer les morts, on les aurait cherchees pour le niveau zero et rendu une
-	// liste vide en croyant que personne n'etait mort.
-	// LE CORPS BRUT, parce que deux lectures ont deja echoue. Le parametre a d'abord ete
-	// lu comme une structure encadree, puis comme un Uint64 nu — a la maniere de
-	// l'implementation de reference — et le journal affiche « data_id=0 » dans les deux
-	// cas. Continuer a proposer des formes serait la troisieme supposition d'affilee ;
-	// on regarde les octets.
-	fmt.Printf("[SMM2 Courses] get_death_positions(103) corps brut len=%d: %x\n", len(req.Body), req.Body)
-
-	// LE PARAMETRE EST BIEN UNE STRUCTURE ENCADREE, et la lecture d'origine avait raison.
-	//
-	// Je l'avais changee en Uint64 nu parce que l'implementation de reference decode ainsi,
-	// et parce que le journal affichait « data_id=0 ». Les octets, mesures ensuite, disent
-	// autre chose :
+	// Le parametre de CETTE methode est une structure encadree, mesuree le 2026-08-29 :
 	//
 	//	000c000000 6f0a000000000000 03000000
 	//	 ^version   ^data_id 2671    ^un u32 de sens inconnu
 	//
-	// Deux suppositions de suite sur une forme qu'un seul volcado suffisait a etablir.
-	//
-	// Le « data_id=0 » n'est PAS explique pour autant : certains appels semblent porter un
-	// corps different. Le volcado ci-dessus reste en place pour l'attraper.
+	// Ces octets ont d'abord ete attribues par erreur a GetDeathPositions (103) : le
+	// volcado avait ete insere dans CETTE fonction-ci en croyant modifier l'autre. Le
+	// « data_id=0 » de la 103 reste donc entier et non mesure.
 	in := nex.NewStreamIn(req.Body, s)
 	var dataID uint64
 	if s.StructHeader {
@@ -513,28 +493,44 @@ func smm2CanPostRatingAndComment(conn *nex.Connection, req *nex.RMCMessage) *nex
 	// LE BOOLEEN VEUT DIRE « RESTREINT », PAS « AUTORISE ». Mesure : a true, le jeu
 	// refusait de commenter ; a false, il accepte. Le wiki les donne « Unknown » et
 	// personne ne les a jamais nommes publiquement.
-	variante := formeEssai(61, 3)
-	autorise, quota := true, uint32(0)
+	// LE TROU ENTRE LES VARIANTES. Aucune ne combinait « non restreint » et un quota :
+	// les trois premieres restreignaient, la quatrieme laissait passer mais annoncait un
+	// quota de ZERO. Les commentaires marchaient donc — c'est le booleen qui les commande —
+	// et les boutons « J'aime » et « Bouh » restaient morts, affiches et insensibles, parce
+	// qu'il ne restait aucune note a donner.
+	//
+	// La variante 4 fait les deux, et devient le defaut. Les anciennes restent pour pouvoir
+	// revenir en arriere d'un `echo` :
+	//   echo 3 > /opt/smm2/smm2_61.forme   -> l'ancien defaut (sans quota)
+	//   echo 4 > ...                       -> non restreint, quota 100  (defaut)
+	//
+	// `restreint` porte enfin le nom de ce qu'il veut dire. Il s'appelait `autorise` et
+	// valait l'inverse de sa lecture : le journal affichait « autorise=false » sur le seul
+	// reglage qui autorisait quelque chose.
+	variante := formeEssai(61, 4)
+	restreint, quota := true, uint32(0)
 	switch variante {
 	case 1:
 		quota = 1
 	case 2:
 		quota = 100
 	case 3:
-		autorise = false
+		restreint = false
+	case 4:
+		restreint, quota = false, 100
 	}
 
 	corps := nex.NewStreamOut(s)
 	corps.U64(dataID)
-	corps.Bool(autorise) // peut noter
+	corps.Bool(restreint) // notation restreinte
 	corps.U32(quota)
-	corps.U32(0)         // Map<Uint8,Uint32> vide
-	corps.Bool(autorise) // peut commenter
+	corps.U32(0)          // Map<Uint8,Uint32> vide
+	corps.Bool(restreint) // commentaires restreints
 	corps.U32(quota)
 	corps.U32(0)
 
-	fmt.Printf("[SMM2 Courses] can_post_rating_and_comment(61) data_id=%d -> variante %d : autorise=%v quota=%d\n",
-		dataID, variante, autorise, quota)
+	fmt.Printf("[SMM2 Courses] can_post_rating_and_comment(61) data_id=%d -> variante %d : restreint=%v quota=%d\n",
+		dataID, variante, restreint, quota)
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, frameStruct(s, 0, corps.Bytes()))
 }
 
