@@ -307,9 +307,14 @@ func smm2GetBattleModeRating(conn *nex.Connection, req *nex.RMCMessage) *nex.RMC
 	}
 
 	valeurs := []uint32{1500, 350, 60000}
+	nue := false
 	if b, err := os.ReadFile("/data/smm2_117.valeurs"); err == nil {
+		texte := strings.TrimSpace(string(b))
+		if reste, ok := strings.CutPrefix(texte, "nu,"); ok {
+			nue, texte = true, reste
+		}
 		var lus []uint32
-		for _, part := range strings.Split(strings.TrimSpace(string(b)), ",") {
+		for _, part := range strings.Split(texte, ",") {
 			n, err := strconv.ParseUint(strings.TrimSpace(part), 10, 32)
 			if err != nil {
 				lus = nil
@@ -326,10 +331,20 @@ func smm2GetBattleModeRating(conn *nex.Connection, req *nex.RMCMessage) *nex.RMC
 	for _, v := range valeurs {
 		corps.U32(v)
 	}
-	out := frameStruct(s, 0, corps.Bytes())
 
-	fmt.Printf("[SMM2 Courses] get_battle_mode_rating(117) pid=%d -> glicko2 %v (DEDUCTION : reponse non documentee)\n",
-		conn.PID, valeurs)
+	// ENCADREE PAR DEFAUT, NUE SUR DEMANDE. On sait que les valeurs sont des Uint32 — le
+	// vidage d'EndBattleModeParam les charge par `ldr w1` — mais rien ne dit si elles
+	// voyagent dans une structure ou en clair. Deux possibilites, un `echo` pour passer de
+	// l'une a l'autre : prefixer la liste par « nu, ».
+	out := frameStruct(s, 0, corps.Bytes())
+	forme := "encadree"
+	if nue {
+		out = corps.Bytes()
+		forme = "nue"
+	}
+
+	fmt.Printf("[SMM2 Courses] get_battle_mode_rating(117) pid=%d -> glicko2 %v (%s, DEDUCTION)\n",
+		conn.PID, valeurs, forme)
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out)
 }
 
