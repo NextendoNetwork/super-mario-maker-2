@@ -330,6 +330,7 @@ func startStorageServer() {
 	resultats.charger(storageDir)
 	commentaires.charger(storageDir)
 	endless.charger(storageDir)
+	superMondes.charger(storageDir)
 	// Une seule passe au demarrage pour etablir premieres reussites et records, et pour
 	// rattraper les fichiers ecrits avant que ces compteurs existent.
 	resultats.reconstruireCompteurs()
@@ -342,6 +343,10 @@ func startStorageServer() {
 	// alimente l'ecran « niveaux publies » du joueur (UserInfo.unk9).
 	nex.SMM2CompteurPublies = courses.nombrePublies
 	nex.SMM2CompteurStats = resultats.statsDe
+	// L'identifiant du super monde du createur, pour son profil (UserInfo.SuperWorldId).
+	nex.SMM2SuperMondeIDFn = SMM2SuperMondeIDDe
+	// La traduction NSA -> PID, pour que la bibliotheque puisse la faire aussi.
+	nex.SMM2PIDJoueurFn = pidJoueur
 	nex.SMM2MasqueBooleensFn = func() uint32 { return uint32(formeEssai(9998, 7)) }
 	mux := http.NewServeMux()
 	mux.HandleFunc("/object/", objectHandler)

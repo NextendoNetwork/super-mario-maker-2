@@ -8,16 +8,28 @@ package main
 // reponse, l'ecran affiche « Niveau publie (ID : ) » avec un identifiant vide — le
 // niveau est bien sur le disque, mais le joueur repart sans son code.
 //
-// LES CHAMPS OPTIONNELS. Les seize premiers sont toujours ecrits. Les suivants sont
-// commandes par un masque que le CLIENT envoie dans sa requete (Result options) : on
-// n'ecrit un champ que si le bit correspondant est demande. Ecrire un champ non demande
-// decale toute la suite, et le client rejette la reponse entiere.
+// LES CHAMPS DITS OPTIONNELS SONT TOUJOURS ECRITS. La note precedente affirmait le
+// contraire — qu'un bit du masque « Result options » commandait chaque champ, et
+// qu'ecrire un champ non demande decalait toute la suite. C'etait une deduction tiree de
+// la colonne « Option » de la documentation, jamais une mesure.
+//
+// Elle ne s'est jamais trahie parce que TOUS les appels qui marchaient envoyaient le
+// masque 0x1ff, ou les neuf bits sont poses : « ecrire ce qui est demande » et « tout
+// ecrire » y donnent exactement les memes octets. Le mode sans fin est le premier a
+// demander autre chose — 0x3f — et nous taisions alors trois champs que le client
+// attendait quand meme : la table Unk4 et les deux vignettes. Il rejetait la reponse
+// entiere, ce qui s'affiche « erreur de connexion ».
+//
+// L'implementation de reference declare ces champs sans condition et son encodeur les
+// ecrit toujours. Ce changement ne peut donc pas abimer ce qui fonctionne : a 0x1ff la
+// sortie est identique au byte pres.
 //
 // Structures relevees dans la documentation PretendoNetwork.
 
 import (
 	"fmt"
 	"os"
+	"sort"
 	"time"
 
 	nex "github.com/NextendoNetwork/nextendo-nex"
@@ -100,7 +112,7 @@ func ecrireCourseInfo(out *nex.StreamOut, c *courseMeta, options uint32) {
 		nex.WriteMap(f, map[uint8]uint32{}, func(o *nex.StreamOut, k uint8) { o.U8(k) }, func(o *nex.StreamOut, v uint32) { o.U32(v) })
 	}
 	r := resultats.lire(c.DataID)
-	if options&optPlayStats != 0 {
+	{
 		// Cles documentees : 0 parties, 1 tentatives, 3 reussites. On n'ecrit que
 		// celles dont on connait le sens ; les cles 2 et 4 restent absentes plutot que
 		// remplies de zeros qui affirmeraient « zero partie en versus » alors qu'on ne
@@ -109,13 +121,9 @@ func ecrireCourseInfo(out *nex.StreamOut, c *courseMeta, options uint32) {
 			func(o *nex.StreamOut, k uint8) { o.U8(k) },
 			func(o *nex.StreamOut, v uint32) { o.U32(v) })
 	}
-	if options&optRatings != 0 {
-		vide()
-	}
-	if options&optUnk40 != 0 {
-		vide()
-	}
-	if options&optTimeStats != 0 {
+	vide() // Ratings
+	vide() // Unk4
+	{
 		// CourseTimeStats : PID, PID, Uint32, Uint32 — pas trois Uint32 comme je l'avais
 		// ecrit de tete. Sur Switch un PID fait huit octets, donc mon erreur decalait la
 		// fiche de douze octets et le client rejetait TOUTE la reponse. Les zeros sont
@@ -133,7 +141,7 @@ func ecrireCourseInfo(out *nex.StreamOut, c *courseMeta, options uint32) {
 			f.Write(ts.Bytes())
 		}
 	}
-	if options&optCommentStats != 0 {
+	{
 		// Cle 0 : le nombre de commentaires. Une table VIDE fait afficher « 9999 » au
 		// jeu — sa facon de dire qu'il n'a pas la donnee. Un vrai zero vaut mieux qu'un
 		// nombre inquietant qui n'est meme pas un nombre.
@@ -170,27 +178,15 @@ func ecrireCourseInfo(out *nex.StreamOut, c *courseMeta, options uint32) {
 		}
 		return 0
 	}
-	if options&optUnk10 != 0 {
-		f.U8(octet(1))
-	}
-	if options&optUnk20 != 0 {
-		f.U8(octet(2))
-	}
-	if options&optUnk10 != 0 {
-		f.U8(octet(4))
-	}
-	if options&optUnk20 != 0 {
-		f.U8(octet(8))
-	}
+	f.U8(octet(1))
+	f.U8(octet(2))
+	f.U8(octet(4))
+	f.U8(octet(8))
 	// Types releves dans la documentation, pas devines : 2 = vignette d'un ecran,
 	// 3 = vignette du niveau entier. J'avais mis 5 et 1, donc on renvoyait l'adresse
 	// des mauvais fichiers.
-	if options&optThumbOneScr != 0 {
-		ecrireMiniature(f, c, 2)
-	}
-	if options&optThumbEntire != 0 {
-		ecrireMiniature(f, c, 3)
-	}
+	ecrireMiniature(f, c, 2)
+	ecrireMiniature(f, c, 3)
 
 	if s.StructHeader {
 		out.U8(0)
@@ -345,18 +341,27 @@ func smm2SearchCoursesPostedBy(conn *nex.Connection, req *nex.RMCMessage) *nex.R
 	// pourtant trouvee : « 1 niveau » dans le journal, et une erreur a l'ecran.
 	options := p.U32()
 
-	// ResultRange (offset + nombre) puis la liste des createurs demandes. On lit
-	// l'etendue pour ne pas se decaler, meme si la pagination n'est pas encore appliquee.
+	// ResultRange (offset + nombre) : desormais APPLIQUEE, et non plus seulement lue.
+	//
+	// Elle etait consommee pour ne pas se decaler, avec la note « la pagination n'est pas
+	// encore appliquee ». Tant que personne n'avait plus d'une page de niveaux, cela ne se
+	// voyait pas. Des qu'un createur en a assez pour deux pages, le jeu demande la seconde
+	// et recoit la premiere : les memes niveaux en double, et ceux qu'il attendait absents.
+	var depart, combien uint32
 	if s.StructHeader {
 		_ = p.U8()
 		rr := p.Substream()
-		_ = rr.U32() // offset
-		_ = rr.U32() // taille
+		depart = rr.U32()
+		combien = rr.U32()
 	} else {
-		_ = p.U32()
-		_ = p.U32()
+		depart = p.U32()
+		combien = p.U32()
 	}
-	proprios := nex.ReadList(p, func(i *nex.StreamIn) uint64 { return i.PID() })
+	demandes := nex.ReadList(p, func(i *nex.StreamIn) uint64 { return i.PID() })
+	// La console designe le createur par son identifiant NSA, pas par son PID NEX. Voir
+	// smm2_identifiants.go : c'est ce qui empechait de publier un super monde.
+	proprios := pidsJoueurs(demandes)
+
 	if err := p.Err(); err != nil {
 		fmt.Printf("[SMM2 Courses] search_posted_by(74) : parametre illisible (%v)\n", err)
 		return nex.NewRMCError(s, 0x73, req.CallID, 0x00690002)
@@ -379,6 +384,33 @@ func smm2SearchCoursesPostedBy(conn *nex.Connection, req *nex.RMCMessage) *nex.R
 	}
 	courses.mu.Unlock()
 
+	// TRI STABLE, du plus recent au plus ancien. On parcourait `courses.byID`, une carte
+	// Go, dont l'ordre de parcours est VOLONTAIREMENT aleatoire : « mes niveaux » sortaient
+	// dans un ordre different a chaque appel. Combine avec la pagination ci-dessous, le jeu
+	// ne pouvait pas retrouver deux fois le meme niveau a la meme place.
+	//
+	// C'est la troisieme fois que ce depot se fait mordre par l'ordre d'une carte Go, apres
+	// le departage du Ranking2 et le choix du rassemblement dans MessageDelivery. Le
+	// data_id departage les ex aequo : il est unique et ne bouge jamais.
+	sort.Slice(liste, func(a, b int) bool {
+		if liste[a].CreatedAt != liste[b].CreatedAt {
+			return liste[a].CreatedAt > liste[b].CreatedAt
+		}
+		return liste[a].DataID > liste[b].DataID
+	})
+
+	total := len(liste)
+	// Une etendue hors des bornes rend une page VIDE, pas la liste entiere : c'est la
+	// reponse juste a « donne-moi ce qui vient apres la fin ».
+	if depart >= uint32(total) {
+		liste = nil
+	} else {
+		liste = liste[depart:]
+		if combien > 0 && combien < uint32(len(liste)) {
+			liste = liste[:combien]
+		}
+	}
+
 	if os.Getenv("SMM2_COURSEINFO") != "1" {
 		liste = nil // meme raison que pour la 70
 	}
@@ -389,8 +421,12 @@ func smm2SearchCoursesPostedBy(conn *nex.Connection, req *nex.RMCMessage) *nex.R
 	}
 	out.Bool(true)
 
-	fmt.Printf("[SMM2 Courses] search_posted_by(74) pid=%d options=0x%x -> %d niveau(x)\n",
-		conn.PID, options, len(liste))
+	// On journalise le createur INTERROGE, pas seulement celui qui demande. La ligne
+	// precedente n'imprimait que conn.PID : un « 0 niveau » ne disait donc pas si le joueur
+	// n'avait rien publie ou s'il consultait quelqu'un d'autre, et j'ai perdu une mesure
+	// entiere a confondre les deux.
+	fmt.Printf("[SMM2 Courses] search_posted_by(74) demandeur=%d demandes=%v -> createurs=%v etendue=%d+%d options=0x%x -> %d/%d niveau(x)\n",
+		conn.PID, demandes, proprios, depart, combien, options, len(liste), total)
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
 }
 
@@ -418,15 +454,16 @@ func estFichierRattache(nom string) bool {
 func smm2CanPostRatingAndComment(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
 	s := conn.Settings
 
+	// Le parametre est un Uint64 NU, pas une structure : l'implementation de reference le
+	// decode directement, sans en-tete ni longueur. Nous lisions une version puis un
+	// sous-flux, donc nous lisions le data_id la ou il n'etait pas — le journal affichait
+	// « data_id=0 » a chaque appel, pour tous les niveaux.
+	//
+	// Sans consequence tant que la reponse etait vide de toute facon. Mais le jour ou l'on
+	// saura enregistrer les morts, on les aurait cherchees pour le niveau zero et rendu une
+	// liste vide en croyant que personne n'etait mort.
 	in := nex.NewStreamIn(req.Body, s)
-	var dataID uint64
-	if s.StructHeader {
-		_ = in.U8()
-		p := in.Substream()
-		dataID = p.U64()
-	} else {
-		dataID = in.U64()
-	}
+	dataID := in.U64()
 
 	// LES DEUX Uint32 SONT UNE INCONNUE, ET LEUR VALEUR COMPTE.
 	//

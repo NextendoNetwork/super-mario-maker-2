@@ -32,6 +32,10 @@ type partieEndless struct {
 	Reussites   uint32 `json:"reussites"`
 	Pieces      uint8  `json:"pieces"`
 	PointsScore uint32 `json:"points"`
+	// CoursActuel : le niveau en cours. Il sert a distinguer « le joueur passe au niveau
+	// suivant » de « le joueur vient de MOURIR et recommence le meme » — c'est le seul
+	// signal dont on dispose pour decompter une vie, le jeu ne dit pas « je suis mort ».
+	CoursActuel uint64 `json:"cours_actuel"`
 }
 
 type magasinEndless struct {
@@ -100,4 +104,75 @@ func (m *magasinEndless) demarrer(pid uint64, difficulte uint8) {
 	}
 	m.ecrireLocked()
 	m.mu.Unlock()
+}
+
+// demarrerCours enregistre le niveau lance. Rend les vies, les reussites, et s'il s'agit
+// d'une mort — c'est-a-dire d'un relancement du MEME niveau.
+func (m *magasinEndless) demarrerCours(pid uint64, difficulte uint8, cours uint64) (uint8, uint32, bool) {
+	if difficulte > 3 {
+		return 0, 0, false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p, ok := m.parPID[pid]
+	if !ok {
+		p = &[4]partieEndless{}
+		m.parPID[pid] = p
+	}
+	e := &p[difficulte]
+	mort := e.CoursActuel != 0 && e.CoursActuel == cours
+	if mort && e.Vies > 0 {
+		e.Vies--
+	}
+	e.CoursActuel = cours
+	m.ecrireLocked()
+	return e.Vies, e.Reussites, mort
+}
+
+// reussirCours acte un niveau termine : une reussite de plus, et des vies gagnees dans la
+// limite du maximum de la difficulte. Sans ce plafond, un joueur accumulerait des vies sans
+// fin et le mode cesserait d'etre un mode « sans fin ».
+func (m *magasinEndless) reussirCours(pid uint64, difficulte, viesGagnees, pieces uint8, points uint32) (uint8, uint32) {
+	if difficulte > 3 {
+		return 0, 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p, ok := m.parPID[pid]
+	if !ok {
+		p = &[4]partieEndless{}
+		m.parPID[pid] = p
+	}
+	e := &p[difficulte]
+	max := viesInitialesEndless[difficulte]
+	if int(e.Vies)+int(viesGagnees) > int(max) {
+		e.Vies = max
+	} else {
+		e.Vies += viesGagnees
+	}
+	e.Reussites++
+	e.Pieces = pieces
+	e.PointsScore = points
+	e.CoursActuel = 0 // le niveau est fini : le suivant ne sera pas une mort
+	m.ecrireLocked()
+	return e.Vies, e.Reussites
+}
+
+// terminer clot la partie : le mode repasse a zero, mais les reussites sont RENDUES avant
+// d'etre effacees — c'est le score de la partie, et le jeu l'affiche.
+func (m *magasinEndless) terminer(pid uint64, difficulte uint8) (uint8, uint32) {
+	if difficulte > 3 {
+		return 0, 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p, ok := m.parPID[pid]
+	if !ok {
+		return 0, 0
+	}
+	e := &p[difficulte]
+	vies, reussites := e.Vies, e.Reussites
+	*e = partieEndless{}
+	m.ecrireLocked()
+	return vies, reussites
 }

@@ -22,20 +22,18 @@ var smm2EmptyBuilders = map[uint32]func(*nex.StreamOut){
 	// NOTE: get_users(48) reste en REPLAY — SMM2 exige un UserInfo valide (son PROPRE profil) au
 	// boot, une liste vide casse l'init. Le nettoyer proprement = construire un UserInfo dynamique
 	// pour le PID connecté (structure lourde, prochaine étape) au lieu de rejouer la session capturée.
-	53:  func(o *nex.StreamOut) { o.U32(0) },                         // search_users_played_course: users[]
-	54:  func(o *nex.StreamOut) { o.U32(0) },                         // search_users_cleared_course
-	55:  func(o *nex.StreamOut) { o.U32(0) },                         // search_users_positive_rated_course
-	70:  func(o *nex.StreamOut) { o.U32(0); o.U32(0) },               // get_courses: courses[], results[]
-	71:  func(o *nex.StreamOut) { o.U32(0); o.U32(0); o.Bool(true) }, // point_ranking: courses[], ranks[], result
-	74:  func(o *nex.StreamOut) { o.U32(0); o.Bool(true) },           // search_courses_posted_by
-	75:  func(o *nex.StreamOut) { o.U32(0) },                         // search_courses_positive_rated_by
-	76:  func(o *nex.StreamOut) { o.U32(0) },                         // search_courses_played_by
-	80:  func(o *nex.StreamOut) { o.U32(0); o.Bool(true) },           // search_courses_first_clear
-	81:  func(o *nex.StreamOut) { o.U32(0); o.Bool(true) },           // search_courses_best_time
-	85:  func(o *nex.StreamOut) { o.U32(0); o.U32(0) },               // get_courses_event: courses[], results[]
-	86:  func(o *nex.StreamOut) { o.U32(0) },                         // search_courses_event
-	160: func(o *nex.StreamOut) { o.U32(0); o.U32(0) },               // get_world_map: maps[], results[]
-	162: func(o *nex.StreamOut) { o.U32(0) },                         // search_world_map_pick_up: maps[]
+	53: func(o *nex.StreamOut) { o.U32(0) },                         // search_users_played_course: users[]
+	54: func(o *nex.StreamOut) { o.U32(0) },                         // search_users_cleared_course
+	55: func(o *nex.StreamOut) { o.U32(0) },                         // search_users_positive_rated_course
+	70: func(o *nex.StreamOut) { o.U32(0); o.U32(0) },               // get_courses: courses[], results[]
+	71: func(o *nex.StreamOut) { o.U32(0); o.U32(0); o.Bool(true) }, // point_ranking: courses[], ranks[], result
+	74: func(o *nex.StreamOut) { o.U32(0); o.Bool(true) },           // search_courses_posted_by
+	75: func(o *nex.StreamOut) { o.U32(0) },                         // search_courses_positive_rated_by
+	76: func(o *nex.StreamOut) { o.U32(0) },                         // search_courses_played_by
+	80: func(o *nex.StreamOut) { o.U32(0); o.Bool(true) },           // search_courses_first_clear
+	81: func(o *nex.StreamOut) { o.U32(0); o.Bool(true) },           // search_courses_best_time
+	85: func(o *nex.StreamOut) { o.U32(0); o.U32(0) },               // get_courses_event: courses[], results[]
+	86: func(o *nex.StreamOut) { o.U32(0) },                         // search_courses_event
 
 	// --- Méthodes NON documentées (SMM2 3.x) qui peuplent le HUB Course World (Hot/Popular/New) :
 	//     structure déduite en parsant les réponses capturées (list<CourseInfo>[+ranks][+bool]).
@@ -188,6 +186,50 @@ func smm2DataStoreHandler() nex.RMCHandler {
 			// lieu d'abandonner. La structure du parametre vient de la documentation
 			// PretendoNetwork, celle de la reponse est la meme que pour la 24.
 			return smm2PreparePostObjectCourse(conn, req)
+		case 104:
+			// PostRankingInfo : le jeu annonce un resultat de classement. La forme du
+			// parametre — CourseId puis trois Uint8 — correspond aux onze octets mesures.
+			// Elle ne rend AUCUN corps ; nous repondions quatre octets a zero.
+			return smm2PostRankingInfo(conn, req)
+		case 110:
+			// StartEndlessModeCourse : le joueur lance un niveau de la reserve.
+			return smm2StartEndlessModeCourse(conn, req)
+		case 111:
+			// DominateEndlessModeCourse : niveau termine.
+			return smm2DominateEndlessModeCourse(conn, req)
+		case 112:
+			// PassEndlessModeCourse : niveau passe.
+			return smm2PassEndlessModeCourse(conn, req)
+		case 113:
+			// SuspendEndlessModeCourse : partie mise en pause.
+			return smm2SuspendEndlessModeCourse(conn, req)
+		case 114:
+			// FinishEndlessModeCourse : partie terminee.
+			return smm2FinishEndlessModeCourse(conn, req)
+		case 159:
+			// RegisterWorldMap : le createur publie son super monde.
+			return smm2RegisterWorldMap(conn, req)
+		case 160:
+			// GetWorldMap : les fiches des mondes demandes.
+			return smm2GetWorldMap(conn, req)
+		case 161:
+			// SearchWorldMapPlayedBy : les mondes deja parcourus par ce joueur.
+			return smm2SearchWorldMapPlayedBy(conn, req)
+		case 162:
+			// SearchWorldMapPickUp : la selection affichee dans Course World.
+			return smm2SearchWorldMapPickUp(conn, req)
+		case 163:
+			// GetWorldMapProgress : ou en est ce joueur dans ce monde.
+			return smm2GetWorldMapProgress(conn, req)
+		case 164:
+			// DeleteWorldMap : le createur retire son monde.
+			return smm2DeleteWorldMap(conn, req)
+		case 165:
+			// InitializeWorldMapProgress : recommencer depuis le debut.
+			return smm2InitializeWorldMapProgress(conn, req)
+		case 166:
+			// UpdateWorldMapProgress : le joueur avance dans le monde.
+			return smm2UpdateWorldMapProgress(conn, req)
 		case 132:
 			// Relation-data upload prep (thumbnails + clear-check): per-type descriptor.
 			return smm2PrepareRelationUpload(conn, req)

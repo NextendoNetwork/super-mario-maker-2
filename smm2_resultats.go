@@ -251,6 +251,17 @@ func smm2PostPlayResult(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessa
 	}
 	r := resultats.lire(dataID)
 
+	// LE CORPS BRUT, pour retrouver la marque de mort. Quand un joueur echoue, le jeu
+	// affiche une croix a l'endroit exact ou il est tombe, et cette croix est censee etre
+	// conservee. Aucune methode non traitee ne porte de coordonnees pendant une partie —
+	// verifie sur une partie complete le 2026-08-29 — donc elles voyagent forcement dans un
+	// message qu'on traite deja, et celui-ci en est le seul candidat serieux : il porte
+	// justement des champs centraux qu'on saute sans les lire.
+	//
+	// On ne devine pas leur position : on regarde les octets de deux echecs au meme endroit
+	// et de deux echecs a des endroits differents, et on cherche ce qui change.
+	fmt.Printf("[SMM2 Resultats] post_play_result(96) corps brut len=%d: %x\n", len(req.Body), req.Body)
+
 	fmt.Printf("[SMM2 Resultats] post_play_result(96) pid=%d data_id=%d tentatives=%d temps=%dms termine=%v rediff=%q -> parties=%d reussites=%d record=%dms\n",
 		conn.PID, dataID, tentatives, ms, termine, rediff, r.Parties, r.Reussites, r.RecordMs)
 

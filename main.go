@@ -141,6 +141,12 @@ func main() {
 	// SMM2: DataStore (0x73) + Utility (0x6E) are answered by the measured-response
 	// replay (the wire format) instead of the typed handlers that returned
 	// NotImplemented and froze SMM2's online init. This REPLACES ProtocolUtility.
+	// Les reglages entiers de SMM2, poses AVANT que l'endpoint serve quoi que ce soit.
+	// Ils vivaient un instant dans startStorageServer, lancee en goroutine : la carte
+	// aurait pu etre ecrite pendant qu'une requete la lisait. Un defaut de ce genre ne se
+	// voit qu'une fois sur mille demarrages, et jamais quand on le cherche.
+	nex.UtilityReglagesJeu = smm2ReglagesEntiers
+
 	setupSMM2InitReplay(secureEndpoint)
 	// Pia 5.19 type-8 keepalive: ACK it so SMM2's online menu doesn't soft-lock.
 	setupSMM2Type8Keepalive(secureEndpoint)
