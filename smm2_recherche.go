@@ -300,6 +300,23 @@ func smm2SearchCoursesMultijoueur(conn *nex.Connection, req *nex.RMCMessage) *ne
 func smm2GetBattleModeRating(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
 	s := conn.Settings
 
+	// RENDRE UNE ERREUR, POUR SAVOIR SI LE CLIENT NOUS ECOUTE.
+	//
+	// Onze formes de reponse ont ete essayees, jusqu'au CORPS VIDE inclus — et un corps
+	// vide n'offre rien a rejeter. La console reessaie quand meme, puis abandonne : elle ne
+	// rejette donc probablement pas notre reponse, elle attend autre chose.
+	//
+	// Cette experience-ci le tranche. Si le comportement est IDENTIQUE avec un succes et
+	// avec une erreur, la console ne regarde pas notre reponse du tout, et ce qu'elle
+	// attend est ailleurs — une notification poussee par le serveur, comme les jeux a 99
+	// qui restaient muets sans jamais se plaindre.
+	//
+	//	echo err > /opt/smm2/smm2_117.forme
+	if b, err := os.ReadFile("/data/smm2_117.forme"); err == nil && strings.TrimSpace(string(b)) == "err" {
+		fmt.Printf("[SMM2 Courses] versus(117) pid=%d -> ERREUR volontaire (experience)\n", conn.PID)
+		return nex.NewRMCError(s, 0x73, req.CallID, 0x80690004)
+	}
+
 	// UNE FORME NUMEROTEE dans le fichier reprend la main : c'est le filet qui a protege
 	// le cooperatif pendant les essais.
 	if f := formeEssai(117, -1); f >= 0 {
@@ -414,4 +431,93 @@ func niveauxChoisisPourPartie(pid uint64, combien uint32) []*courseMeta {
 	}
 	choixParties[gid] = choixPartie{niveaux: melange, quand: time.Now()}
 	return melange[:combien]
+}
+
+// smm2SearchCoursesAdvanced : la methode 72, la RECHERCHE AVANCEE de Course World.
+//
+// Elle rendait une liste vide depuis le premier jour — elle figurait dans la table des
+// enveloppes vides, avec les methodes du hub. Les filtres existaient donc a l'ecran et ne
+// ramenaient jamais rien.
+//
+// LA STRUCTURE VIENT DE DEUX SOURCES QUI SE COMPLETENT. Les NOMS et les TYPES sortent des
+// vidages de debogage du binaire du jeu, extraits automatiquement par ~/smm2-re/indexa.py :
+// onze champs, dont sept filtres. L'ORDRE vient de l'implementation de reference, parce que
+// l'ordre d'un vidage n'est pas l'ordre du cable — le compilateur reordonne les lectures, et
+// SearchCoursesEndlessModeParam le montre : le vidage donne resultOption, difficulty, count
+// la ou le cable porte options, count, difficulty.
+//
+// CE QUI RESTE A VERIFIER : ce que vaut « aucun filtre ». On suppose ZERO, ce qui est la
+// convention la plus courante, mais si le jeu numerote ses difficultes a partir de zero
+// alors un joueur cherchant « facile » recevrait tout. Le corps brut est journalise pour
+// trancher a la premiere recherche reelle plutot que d'en debattre.
+func smm2SearchCoursesAdvanced(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
+	s := conn.Settings
+	in := nex.NewStreamIn(req.Body, s)
+	p := in
+	if s.StructHeader {
+		_ = in.U8()
+		p = in.Substream()
+	}
+
+	options := p.U32()
+	var depart, combien uint32
+	if s.StructHeader {
+		_ = p.U8()
+		rr := p.Substream()
+		depart, combien = rr.U32(), rr.U32()
+	} else {
+		depart, combien = p.U32(), p.U32()
+	}
+	difficulte := p.U8()
+	style := p.U8()
+	theme := p.U8()
+	regionsExclues := nex.ReadList(p, func(i *nex.StreamIn) uint8 { return i.U8() })
+	etiquettes := nex.ReadList(p, func(i *nex.StreamIn) uint8 { return i.U8() })
+	tri := p.U8()
+	dateEnvoi := p.U8()
+	nombreJoue := p.U8()
+
+	fmt.Printf("[SMM2 Courses] search_advanced(72) corps brut len=%d: %x\n", len(req.Body), req.Body)
+	if err := p.Err(); err != nil {
+		fmt.Printf("[SMM2 Courses] search_advanced(72) : parametre illisible (%v)\n", err)
+		return nex.NewRMCError(s, 0x73, req.CallID, 0x00690002)
+	}
+
+	// ZERO VEUT DIRE « PAS DE FILTRE » — hypothese, voir l'en-tete. Un filtre qu'on ne sait
+	// pas appliquer est IGNORE plutot que devine : rendre trop de niveaux se voit et se
+	// corrige, rendre les mauvais passe inapercu.
+	var liste []*courseMeta
+	for _, m := range niveauxPublics() {
+		if difficulte != 0 && difficulteNiveau(m) != difficulte {
+			continue
+		}
+		if style != 0 && m.Style != style {
+			continue
+		}
+		if theme != 0 && m.Theme != theme {
+			continue
+		}
+		liste = append(liste, m)
+	}
+
+	total := len(liste)
+	if depart >= uint32(total) {
+		liste = nil
+	} else {
+		liste = liste[depart:]
+		if combien > 0 && combien < uint32(len(liste)) {
+			liste = liste[:combien]
+		}
+	}
+
+	out := nex.NewStreamOut(s)
+	out.U32(uint32(len(liste)))
+	for _, m := range liste {
+		ecrireCourseInfo(out, m, options)
+	}
+	out.Bool(true)
+
+	fmt.Printf("[SMM2 Courses] search_advanced(72) pid=%d options=0x%x etendue=%d+%d difficulte=%d style=%d theme=%d etiquettes=%v regions=%v tri=%d date=%d joue=%d -> %d/%d niveau(x)\n",
+		conn.PID, options, depart, combien, difficulte, style, theme, etiquettes, regionsExclues, tri, dateEnvoi, nombreJoue, len(liste), total)
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
 }
