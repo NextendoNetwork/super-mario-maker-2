@@ -2,9 +2,12 @@ package main
 
 import (
 	"fmt"
+	"math/rand"
 	"os"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	nex "github.com/NextendoNetwork/nextendo-nex"
 )
@@ -240,13 +243,18 @@ func smm2SearchCoursesMultijoueur(conn *nex.Connection, req *nex.RMCMessage) *ne
 		return nex.NewRMCError(s, 0x73, req.CallID, 0x00690002)
 	}
 
-	// L'ordre vient de niveauxPublics, desormais departage par data_id : les DEUX joueurs
-	// d'une meme partie interrogent le serveur chacun de leur cote et doivent recevoir le
-	// meme niveau. Un ordre instable les enverrait dans deux niveaux differents.
-	liste := niveauxPublics()
-	if nombre > 0 && nombre < uint32(len(liste)) {
-		liste = liste[:nombre]
-	}
+	// LE NIVEAU EST TIRE AU SORT, PAS PRIS EN TETE DE LISTE.
+	//
+	// La premiere version rendait simplement les premiers de niveauxPublics, trie du plus
+	// recent au plus ancien : le cooperatif servait donc TOUJOURS le dernier niveau publie.
+	// Trois parties de suite dans « desierto pinchudo ». Ce n'etait pas faux au sens du
+	// protocole, mais c'etait faux au sens du jeu.
+	//
+	// Le tirage est MEMORISE PAR PARTIE. Les joueurs d'une meme partie interrogent le
+	// serveur chacun de leur cote, a une ou deux secondes d'intervalle ; tirer au hasard a
+	// chaque appel les enverrait dans des niveaux differents. Le premier arrive choisit
+	// pour tout le monde, et le choix vaut le temps d'une partie.
+	liste := niveauxChoisisPourPartie(conn.PID, nombre)
 
 	out := nex.NewStreamOut(s)
 	out.U32(uint32(len(liste)))
@@ -315,4 +323,72 @@ func smm2CoursesVersus(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessag
 	fmt.Printf("[SMM2 Courses] versus(117) pid=%d -> %d niveau(x), %s, options=0x3f (HYPOTHESE, non documente)\n",
 		conn.PID, len(liste), forme)
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out)
+}
+
+// --- le tirage du niveau cooperatif ------------------------------------------
+
+// MatchmakingSMM2 : la table des parties, posee au demarrage. Sans elle, le tirage
+// retombe sur un decoupage par tranche de temps, moins sur.
+var MatchmakingSMM2 *nex.Matchmaking
+
+type choixPartie struct {
+	niveaux []*courseMeta
+	quand   time.Time
+}
+
+var (
+	choixMu      sync.Mutex
+	choixParties = map[uint32]choixPartie{}
+)
+
+// dureeChoix : au-dela, la partie est consideree finie et un nouveau tirage a lieu. Assez
+// long pour couvrir une partie entiere, assez court pour ne pas resservir le meme niveau
+// a un groupe qui rejoue.
+const dureeChoix = 10 * time.Minute
+
+// niveauxChoisisPourPartie rend les niveaux a jouer, identiques pour tous les joueurs
+// d'une meme partie.
+func niveauxChoisisPourPartie(pid uint64, combien uint32) []*courseMeta {
+	tous := niveauxPublics()
+	if len(tous) == 0 {
+		return nil
+	}
+	if combien == 0 || combien > uint32(len(tous)) {
+		combien = 1
+	}
+
+	var gid uint32
+	if MatchmakingSMM2 != nil {
+		gid = MatchmakingSMM2.GidDuParticipant(pid)
+	}
+	// Aucune partie trouvee : on retombe sur une tranche de temps commune. Deux consoles
+	// separees par la frontiere d'une tranche tireraient differemment — d'ou la preference
+	// pour l'identifiant de partie quand il existe.
+	if gid == 0 {
+		gid = 1<<31 | uint32(time.Now().Unix()/300)
+	}
+
+	choixMu.Lock()
+	defer choixMu.Unlock()
+	if c, ok := choixParties[gid]; ok && time.Since(c.quand) < dureeChoix && len(c.niveaux) >= int(combien) {
+		return c.niveaux[:combien]
+	}
+
+	// Melange de Fisher-Yates sur une COPIE : niveauxPublics rend des pointeurs vers le
+	// catalogue, et reordonner la tranche rendue ne touche pas le catalogue lui-meme.
+	melange := make([]*courseMeta, len(tous))
+	copy(melange, tous)
+	for i := len(melange) - 1; i > 0; i-- {
+		j := rand.Intn(i + 1)
+		melange[i], melange[j] = melange[j], melange[i]
+	}
+
+	// Menage : sans cela la table grandit avec chaque partie jamais rejouee.
+	for g, c := range choixParties {
+		if time.Since(c.quand) > dureeChoix {
+			delete(choixParties, g)
+		}
+	}
+	choixParties[gid] = choixPartie{niveaux: melange, quand: time.Now()}
+	return melange[:combien]
 }

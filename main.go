@@ -148,6 +148,10 @@ func main() {
 	nex.UtilityReglagesJeu = smm2ReglagesEntiers
 	// Les records du mode sans fin, pour le profil du joueur.
 	nex.SMM2RecordsEndlessFn = endless.recordsDe
+	// La table des parties, pour que le cooperatif serve LE MEME niveau a tout le monde.
+	MatchmakingSMM2 = mm
+	// La table multiplayer_stats : sans note, le versus ne demarre pas. Voir smm2_reglages.go.
+	nex.SMM2StatsMultijoueurFn = statsMultijoueurDe
 
 	setupSMM2InitReplay(secureEndpoint)
 	// Pia 5.19 type-8 keepalive: ACK it so SMM2's online menu doesn't soft-lock.
