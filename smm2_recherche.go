@@ -5,6 +5,7 @@ import (
 	"math/rand"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -267,61 +268,68 @@ func smm2SearchCoursesMultijoueur(conn *nex.Connection, req *nex.RMCMessage) *ne
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
 }
 
-// smm2CoursesVersus : la methode 117, la porte du mode VERSUS.
+// smm2GetBattleModeRating : la methode 117, la porte du mode VERSUS.
 //
-// CE QU'ON SAIT, mesure le 2026-08-29 : elle est appelee sans aucun parametre — le corps
-// est vide — deux fois a cinq secondes d'intervalle, et si la reponse ne lui convient pas
-// la console abandonne le versus. Aucune source publique ne la nomme : ocw-server saute de
-// la 116 a la 123 et son auteur ne l'a jamais implementee.
+// CE QU'ELLE EST, trouve dans le binaire du jeu le 2026-08-29 apres quatre hypotheses
+// ratees. Le jeu porte un etat nomme « State::cGetBattleModeRating » : c'est la requete
+// qu'il lance avant d'appairer, et elle n'a besoin d'aucun parametre puisque l'identite
+// voyage deja dans la connexion.
 //
-// CE QU'ON SUPPOSE, et c'est ecrit comme une supposition : qu'elle rende une liste de
-// fiches, comme la 78 pour le cooperatif et la 79 pour le mode sans fin. La sonde a deja
-// etabli qu'une enveloppe « struct{ liste } » ne fait pas abandonner la console — mais une
-// liste VIDE ne lui donne aucun niveau, exactement l'impasse ou etait le cooperatif avant
-// que la 78 existe.
+// CE QU'ELLE DOIT RENDRE. Le versus de SMM2 classe les joueurs en GLICKO-2, un systeme a
+// trois composantes. On le sait parce que le client les RENVOIE au serveur en fin de
+// combat, dans une structure que le binaire documente :
 //
-// SANS PARAMETRE, il n'y a pas de masque d'options : on prend 0x3f, celui que la console
-// envoie elle-meme a la 78 pour le cooperatif. C'est le choix le moins invente disponible.
+//	EndBattleModeParam: (battleResults=(...), killCount=, killedCount=,
+//	                     glicko2Rate=, glicko2Deviation=, glicko2Volatility=, gid=)
 //
-// Reglable sans redeployer, parce que ce n'est qu'une hypothese :
+// et parce que la liste des champs de telemetrie du jeu contient « rating, glicko2_rate,
+// glicko2_rd, glicko2_volatility ». Un client qui rend ces valeurs les a forcement recues.
 //
-//	echo 1 > /opt/smm2/smm2_117.forme   -> revenir a la liste VIDE
-//	echo 0 > ...                        -> corps vide
-func smm2CoursesVersus(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
+// LES TROIS SONT DES ENTIERS 32 BITS, pas des flottants : dans le vidage ci-dessus chaque
+// champ est charge par `ldr w1, [sp, #...]` sur six mots consecutifs. La volatilite, qui
+// vaut 0,06 en Glicko-2, voyage donc MISE A L'ECHELLE.
+//
+// CE QUI RESTE UNE DEDUCTION : le nombre exact de champs de la REPONSE et l'echelle de la
+// volatilite. Le binaire ne documente que les requetes, jamais les reponses. D'ou une liste
+// reglable sans redeployer — valeurs par defaut : les valeurs de depart de Glicko-2, 1500
+// de note, 350 de deviation, et 0,06 mis a l'echelle par un million.
+//
+//	echo 1500,350,600 > /opt/smm2/smm2_117.valeurs    # autre echelle
+//	echo 1500,350,60000,0 > ...                        # un champ de plus
+//	echo 1 > /opt/smm2/smm2_117.forme                  # revenir aux enveloppes vides
+func smm2GetBattleModeRating(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
 	s := conn.Settings
 
-	// UNE FORME NUMEROTEE dans le fichier reprend la main : /opt/smm2/smm2_117.forme.
+	// UNE FORME NUMEROTEE dans le fichier reprend la main : c'est le filet qui a protege
+	// le cooperatif pendant les essais.
 	if f := formeEssai(117, -1); f >= 0 {
 		return repondreSonde(conn, req, "versus", f)
 	}
 
-	liste := niveauxPublics()
-	if len(liste) > 1 {
-		liste = liste[:1] // le cooperatif en demande UN ; on ne fait pas plus large a l'aveugle
+	valeurs := []uint32{1500, 350, 60000}
+	if b, err := os.ReadFile("/data/smm2_117.valeurs"); err == nil {
+		var lus []uint32
+		for _, part := range strings.Split(strings.TrimSpace(string(b)), ",") {
+			n, err := strconv.ParseUint(strings.TrimSpace(part), 10, 32)
+			if err != nil {
+				lus = nil
+				break
+			}
+			lus = append(lus, uint32(n))
+		}
+		if len(lus) > 0 {
+			valeurs = lus
+		}
 	}
 
 	corps := nex.NewStreamOut(s)
-	corps.U32(uint32(len(liste)))
-	for _, m := range liste {
-		ecrireCourseInfo(corps, m, 0x3f)
+	for _, v := range valeurs {
+		corps.U32(v)
 	}
+	out := frameStruct(s, 0, corps.Bytes())
 
-	// LISTE NUE PAR DEFAUT, comme la 78 et la 79 — les deux methodes de ce protocole qui
-	// rendent des fiches et qui FONCTIONNENT. Le premier essai l'avait encapsulee dans une
-	// structure et la console s'est arretee net : elle recevait la reponse et n'emettait
-	// plus rien. C'etait une divergence gratuite d'avec les deux seuls exemples verifies.
-	//
-	//	echo enc > /opt/smm2/smm2_117.forme   -> reessayer encapsulee
-	//	echo 1   > ...                         -> liste VIDE encapsulee (l'ancien defaut)
-	out := corps.Bytes()
-	forme := "liste nue"
-	if b, err := os.ReadFile("/data/smm2_117.forme"); err == nil && strings.TrimSpace(string(b)) == "enc" {
-		out = frameStruct(s, 0, corps.Bytes())
-		forme = "liste encapsulee"
-	}
-
-	fmt.Printf("[SMM2 Courses] versus(117) pid=%d -> %d niveau(x), %s, options=0x3f (HYPOTHESE, non documente)\n",
-		conn.PID, len(liste), forme)
+	fmt.Printf("[SMM2 Courses] get_battle_mode_rating(117) pid=%d -> glicko2 %v (DEDUCTION : reponse non documentee)\n",
+		conn.PID, valeurs)
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out)
 }
 

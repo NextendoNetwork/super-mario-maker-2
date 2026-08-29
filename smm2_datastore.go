@@ -210,7 +210,7 @@ func smm2DataStoreHandler() nex.RMCHandler {
 			//
 			// Defaut : la forme 1, struct{ liste vide }, celle qui avait debloque la 115.
 			// Le repli generique servait la forme 6, liste nue, qui echoue.
-			return smm2CoursesVersus(conn, req)
+			return smm2GetBattleModeRating(conn, req)
 		case 104:
 			// PostRankingInfo : le jeu annonce un resultat de classement. La forme du
 			// parametre — CourseId puis trois Uint8 — correspond aux onze octets mesures.
