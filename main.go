@@ -48,6 +48,10 @@ var (
 	requireAccount = os.Getenv("NEXTENDO_REQUIRE_ACCOUNT") == "1"
 )
 
+// delaiRetraitSalon : combien de temps un joueur deconnecte garde sa place dans ses salons.
+// Voir OnDisconnect pour pourquoi ce delai existe et pourquoi il vaut trente secondes.
+const delaiRetraitSalon = 30 * time.Second
+
 func main() {
 	settings := nex.NewSwitchSettings(accessKey, nexVersion)
 
@@ -171,7 +175,50 @@ func main() {
 	// phantom lobbies "searching" for a player who is long gone, and matchmaking can hand
 	// those dead sessions to real players.
 	secureEndpoint.OnDisconnect = func(c *nex.Connection) {
-		mm.RemovePlayer(c.PID)
+		// L'HEBERGEMENT PART TOUT DE SUITE, l'appartenance attend.
+		//
+		// Garder la place d'un joueur qui reconnecte est bon ; lui garder le poste d'HOTE
+		// ne l'est pas. Tant qu'il heberge sans etre joignable, GetSessionURLs repond une
+		// liste de stations vide, la console part en migration d'hote et parcourt une
+		// collection dont la racine est un pointeur invalide : Data Abort, le jeu se ferme.
+		// C'est ce que disait le rapport de plantage du 2026-09-02, pile
+		// NexProcessHostMigrationJob::WaitNewHostGreeting.
+		mm.MigrerHebergementDepuis(c.PID, secureEndpoint)
+
+		// DELAI DE GRACE avant de retirer un joueur de ses salons.
+		//
+		// Les consoles ferment et rouvrent leur connexion sans arret pendant l'appariement
+		// du versus : mesure du 2026-09-02, 52 connexions en quatre minutes pour 27
+		// joueurs, jusqu'a seize reprises pour un seul. Retirer le PID des l'instant ou la
+		// connexion meurt arrachait le joueur du salon ou il venait d'entrer.
+		//
+		// Ce que ca donnait : plusieurs personnes cherchaient en meme temps et restaient
+		// toutes sur « recherche en cours ». Dans le journal la liste des participants
+		// oscillait — [A,B] puis [A,C] puis [A,C,B] puis [A,C] — et le salon ne se
+		// remplissait jamais. Rien ne le signalait, RemovePlayer ne trace que les
+		// migrations de proprietaire ; une eviction ordinaire est muette.
+		//
+		// ⚠️ Une premiere version testait « ce PID a-t-il deja une connexion plus recente »
+		// et n'a JAMAIS declenche, mesure en production : les consoles ne chevauchent pas
+		// leurs connexions, elles ferment PUIS rouvrent. Le test etait juste sur le papier
+		// et inutile sur le cable. D'ou l'attente, qui ne suppose rien sur l'ordre.
+		//
+		// Trente secondes : 40% des reconnexions mesurees tiennent dans ce delai, et un
+		// salon fantome ne survit au pire que trente secondes — a comparer aux vrais salons
+		// detruits en permanence par l'ancien comportement. Le raccourcir ne coute rien
+		// d'autre que de couvrir moins de cas.
+		go func(pid uint64) {
+			time.Sleep(delaiRetraitSalon)
+
+			// Revenu entre-temps : il est toujours en ligne, ses salons lui appartiennent.
+			if secureEndpoint.FindConnectionByPID(pid) != nil {
+				return
+			}
+
+			fmt.Printf("[SMM2 Secure] pid=%d absent depuis %s -> retire de ses salons\n",
+				pid, delaiRetraitSalon)
+			mm.RemovePlayer(pid)
+		}(c.PID)
 	}
 	secureServer := nex.NewServer(secureEndpoint)
 

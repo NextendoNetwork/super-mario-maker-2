@@ -38,7 +38,6 @@ var smm2EmptyBuilders = map[uint32]func(*nex.StreamOut){
 	// --- Méthodes NON documentées (SMM2 3.x) qui peuplent le HUB Course World (Hot/Popular/New) :
 	//     structure déduite en parsant les réponses capturées (list<CourseInfo>[+ranks][+bool]).
 	//     Ce sont elles qui affichaient les faux niveaux Nintendo -> on les vide aussi.
-	72: func(o *nex.StreamOut) { o.U32(0); o.Bool(true) }, // courses[], result
 }
 
 // smm2DataStoreHandler : contenu -> VIDE ; sinon -> replay capturé (méthodes structurelles du
@@ -190,6 +189,13 @@ func smm2DataStoreHandler() nex.RMCHandler {
 			// lieu d'abandonner. La structure du parametre vient de la documentation
 			// PretendoNetwork, celle de la reponse est la meme que pour la 24.
 			return smm2PreparePostObjectCourse(conn, req)
+		case 72:
+			// SearchCoursesAdvanced : les filtres de Course World, qui ne ramenaient
+			// jamais rien. Voir smm2_recherche.go.
+			return smm2SearchCoursesAdvanced(conn, req)
+		case 77:
+			// SearchCoursesBattleMode : le niveau du VERSUS. Voir smm2_recherche.go.
+			return smm2SearchCoursesBattleMode(conn, req)
 		case 78:
 			// SearchCourses pour le COOPERATIF. Voir smm2_recherche.go : c'est elle qui
 			// faisait dire « donnees du niveau corrompues ».
@@ -211,6 +217,79 @@ func smm2DataStoreHandler() nex.RMCHandler {
 			// Defaut : la forme 1, struct{ liste vide }, celle qui avait debloque la 115.
 			// Le repli generique servait la forme 6, liste nue, qui echoue.
 			return smm2GetBattleModeRating(conn, req)
+		case 118, 120, 121, 122:
+			// CORPS DE REPONSE VIDE, et c'est mesure, pas suppose.
+			//
+			// L'analyseur de reponse de ces quatre methodes est un simple `ret` dans le
+			// binaire : 0x5e7ac0 (118), 0x5e7bb0 (120), 0x5e7bc0 (121), 0x5e7bd0 (122).
+			// Elles n'ont AUCUN parametre de sortie. Le chemin qui mene a ces adresses est
+			// decrit dans la section versus de CLAUDE.md.
+			//
+			// Le repli generique ecrivait « liste vide », soit un uint32 a zero : QUATRE
+			// octets la ou la console n'en attend aucun. Meme famille de panne que l'octet
+			// de la chaine vide — la console ne se plaint pas, elle rappelle en boucle puis
+			// affiche une erreur de connexion.
+			//
+			// Mesure du 2026-09-02, le soir ou la 117 est passee pour la premiere fois :
+			// l'appariement forme bien un salon (trois joueurs, gid=41), le percage NAT
+			// reussit (tous « ok », 121 a 238 ms), la console appelle 20 fois la 121 et 31
+			// fois la 122 — et s'arrete la, apres avoir affiche les joueurs a l'ecran.
+			//
+			// La 119 n'est PAS dans cette liste : son analyseur (0x5e7ad0) lit DEUX
+			// structures { uint32 ; bool } et aucun bool de tete — la meme classe que la
+			// 117 mais pas la meme reponse. Elle a son propre cas juste en dessous.
+			// ON IMPRIME CE QU'ON RECOIT, pas seulement ce qu'on decide.
+			//
+			// La 118 est StartBattleMode : d'apres le binaire son parametre porte
+			// `dataId, gid, pids(...)`. C'est la vue que la CONSOLE a du match — quel
+			// niveau, quel salon, et surtout QUELS JOUEURS elle croit avoir en face. Si
+			// cette liste est plus courte que le salon, la partie ne peut pas se terminer :
+			// personne ne franchit jamais l'arrivee pour les autres.
+			//
+			// Symptome rapporte le 2026-09-02 : « ils arrivent au but et il ne se passe
+			// rien ». Meme signature que le bogue ACNH ou le percage NAT repondait « ok »
+			// pendant que l'hote n'avait jamais inscrit le visiteur dans son maillage.
+			if n := len(req.Body); n > 0 {
+				max := n
+				if max > 96 {
+					max = 96
+				}
+				fmt.Printf("[SMM2 Courses] versus 0x73.%d pid=%d corps len=%d: %x\n",
+					req.Method, conn.PID, n, req.Body[:max])
+			}
+			fmt.Printf("[SMM2 Courses] versus 0x73.%d pid=%d -> corps vide (MESURE)\n",
+				req.Method, conn.PID)
+
+			return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
+
+		case 119:
+			// DEUX structures { uint32 ; bool }, sans bool de tete. Lu a 0x5e7ad0.
+			//
+			// Jamais vue passer : on la sert quand meme, parce que le repli generique lui
+			// enverrait quatre octets la ou elle en attend vingt, et qu'une reponse fausse
+			// par la forme ne se signale jamais — elle fait juste echouer la suite.
+			// Les valeurs sont celles que le client se donne lui-meme faute de mieux.
+			// LE CORPS DE LA 119 EST CE QU'ON N'A JAMAIS VU.
+			//
+			// D'apres le binaire, EndBattleModeParam porte battleResults, killCount,
+			// killedCount, les trois composantes Glicko-2 et le gid. Ce sont les valeurs que
+			// la CONSOLE a calculees a partir de ce qu'on lui avait servi en 117 : les lire
+			// dit d'un coup si elle a compris nos notes, et lesquelles elle nous rend.
+			//
+			// On l'imprime au lieu d'essayer une valeur de plus. Trois essais a l'aveugle ont
+			// deja coute une partie chacun a des joueurs reels.
+			if n := len(req.Body); n > 0 {
+				max := n
+				if max > 160 {
+					max = 160
+				}
+				fmt.Printf("[SMM2 Courses] versus 0x73.119 pid=%d corps len=%d: %x\n",
+					conn.PID, n, req.Body[:max])
+			}
+			fmt.Printf("[SMM2 Courses] versus 0x73.119 pid=%d -> 2 structures (MESURE)\n",
+				conn.PID)
+
+			return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, encode119(s))
 		case 104:
 			// PostRankingInfo : le jeu annonce un resultat de classement. La forme du
 			// parametre — CourseId puis trois Uint8 — correspond aux onze octets mesures.

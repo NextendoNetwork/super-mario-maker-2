@@ -323,45 +323,41 @@ func smm2GetBattleModeRating(conn *nex.Connection, req *nex.RMCMessage) *nex.RMC
 		return repondreSonde(conn, req, "versus", f)
 	}
 
-	valeurs := []uint32{1500, 350, 60000}
-	nue := false
-	if b, err := os.ReadFile("/data/smm2_117.valeurs"); err == nil {
-		texte := strings.TrimSpace(string(b))
-		if reste, ok := strings.CutPrefix(texte, "nu,"); ok {
-			nue, texte = true, reste
-		}
-		var lus []uint32
-		for _, part := range strings.Split(texte, ",") {
-			n, err := strconv.ParseUint(strings.TrimSpace(part), 10, 32)
-			if err != nil {
-				lus = nil
-				break
-			}
-			lus = append(lus, uint32(n))
-		}
-		if len(lus) > 0 {
-			valeurs = lus
-		}
-	}
+	// FORME MESUREE DANS LE BINAIRE le 2026-09-01, et non plus deduite.
+	//
+	// L'analyseur de la reponse du 117 est a 0x5e79b0 dans main.bin, une fois appliquees les
+	// 252 169 relocations que le fichier ne portait pas : sans elles tous les pointeurs de
+	// donnees se lisent a zero et cette table reste invisible. Il recupere TROIS parametres :
+	//
+	//	champ 0 -> 0x4cd70   lit UN octet et le normalise a 0/1   = bool
+	//	champ 1 -> 0x5de6f0  uint8 version + uint32 longueur      = structure
+	//	champ 2 -> 0x5de6f0  la meme classe
+	//
+	// et le corps de cette structure est exactement { uint32 ; bool }, apres quoi le lecteur
+	// saute a la fin annoncee par la longueur.
+	//
+	// Les douze formes essayees jusqu'ici etaient TOUTES des suites d'uint32, encadrees ou
+	// nues, a un, trois ou quatre champs. Aucune ne commence par un bool, aucune ne porte de
+	// structure imbriquee : elles ne pouvaient pas passer, quelles que soient les valeurs.
+	// C'etait la forme qui etait fausse, jamais les nombres.
+	//
+	// Cette structure n'est lue que par DEUX methodes dans tout le binaire, la 117 et la 119,
+	// toutes deux du bloc versus : c'est un type propre au mode, pas un type generique. Elle
+	// ne porte qu'UN uint32, donc ce n'est pas non plus le triplet Glicko-2 qu'on supposait.
+	//
+	// ⚠️ Les VALEURS restent inconnues. Le constructeur par defaut du client pose
+	// uint32 = 0xFFFFFFFF et bool = false, ce qui se lit comme « pas encore classe » ; ce sont
+	// les seules valeurs qu'on ait vu le client se donner lui-meme, donc ce sont celles par
+	// defaut ici. En choisir d'autres sans les mesurer, ce serait retomber dans la devinette.
+	//
+	//	echo "1,1500,1,350,1" > /opt/smm2/smm2_117.valeurs
+	//	       ^   ^    ^     champ0 , puis (valeur,drapeau) pour chacune des deux structures
+	classe, notes := valeursVersus()
 
-	corps := nex.NewStreamOut(s)
-	for _, v := range valeurs {
-		corps.U32(v)
-	}
+	out := encode117(s, classe, notes)
 
-	// ENCADREE PAR DEFAUT, NUE SUR DEMANDE. On sait que les valeurs sont des Uint32 — le
-	// vidage d'EndBattleModeParam les charge par `ldr w1` — mais rien ne dit si elles
-	// voyagent dans une structure ou en clair. Deux possibilites, un `echo` pour passer de
-	// l'une a l'autre : prefixer la liste par « nu, ».
-	out := frameStruct(s, 0, corps.Bytes())
-	forme := "encadree"
-	if nue {
-		out = corps.Bytes()
-		forme = "nue"
-	}
-
-	fmt.Printf("[SMM2 Courses] get_battle_mode_rating(117) pid=%d -> glicko2 %v (%s, DEDUCTION)\n",
-		conn.PID, valeurs, forme)
+	fmt.Printf("[SMM2 Courses] get_battle_mode_rating(117) pid=%d -> classe=%v notes=[%d/%v %d/%v] (FORME MESUREE)\n",
+		conn.PID, classe, notes[0].valeur, notes[0].valide, notes[1].valeur, notes[1].valide)
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out)
 }
 
@@ -519,5 +515,151 @@ func smm2SearchCoursesAdvanced(conn *nex.Connection, req *nex.RMCMessage) *nex.R
 
 	fmt.Printf("[SMM2 Courses] search_advanced(72) pid=%d options=0x%x etendue=%d+%d difficulte=%d style=%d theme=%d etiquettes=%v regions=%v tri=%d date=%d joue=%d -> %d/%d niveau(x)\n",
 		conn.PID, options, depart, combien, difficulte, style, theme, etiquettes, regionsExclues, tri, dateEnvoi, nombreJoue, len(liste), total)
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
+}
+
+// note117 est une des deux structures que porte la reponse du 117 : un nombre et son
+// drapeau. Le constructeur par defaut du client pose 0xFFFFFFFF / false.
+type note117 struct {
+	valeur uint32
+	valide bool
+}
+
+// encode117 rend la reponse du 117 exactement comme la lit l'analyseur du client, a
+// 0x5e79b0 : un bool, puis DEUX structures encadrees dont le corps est { uint32 ; bool }.
+//
+// Isole du gestionnaire pour qu'une epreuve puisse affirmer sur LES OCTETS. La panne de
+// cette methode etait une panne de forme, pas de valeurs : l'affirmer sur le cable est le
+// seul moyen de ne pas y retomber.
+// structNote117 rend UNE structure encadree { uint32 ; bool }, telle que la lit 0x5de6f0.
+func structNote117(s *nex.Settings, n note117) []byte {
+	corps := nex.NewStreamOut(s)
+	corps.U32(n.valeur)
+	corps.Bool(n.valide)
+
+	return frameStruct(s, 0, corps.Bytes())
+}
+
+func encode117(s *nex.Settings, classe bool, notes [2]note117) []byte {
+	out := nex.NewStreamOut(s)
+	out.Bool(classe)
+	out.Write(structNote117(s, notes[0]))
+	out.Write(structNote117(s, notes[1]))
+
+	return out.Bytes()
+}
+
+// encode119 rend la reponse de la 119 : DEUX structures { uint32 ; bool } et rien devant.
+//
+// Sa forme vient du meme endroit que celle de la 117 — l'analyseur du client, ici a
+// 0x5e7ad0 — et elle en differe par un detail qui suffit a tout casser : pas de bool de
+// tete. C'est pour ce genre d'ecart d'un octet qu'on lit le binaire au lieu de supposer
+// que deux methodes voisines se ressemblent.
+func encode119(s *nex.Settings) []byte {
+	_, notes := valeursVersus()
+
+	out := nex.NewStreamOut(s)
+	out.Write(structNote117(s, notes[0]))
+	out.Write(structNote117(s, notes[1]))
+
+	return out.Bytes()
+}
+
+// valeursVersus lit les notes servies au mode versus, partagees par la 117 et la 119.
+//
+// ELLES SONT PARTAGEES A DESSEIN. La 117 les donne avant le match, la 119 les rend a la fin ;
+// servir le defaut d'un cote et une vraie note de l'autre, c'est exactement le melange qui
+// faisait planter la console a l'arrivee.
+//
+// Mesure du 2026-09-02 : avec le centinelle du client (0xFFFFFFFF, invalide) la partie
+// plantait au moment de franchir le but et la 119 n'etait JAMAIS appelee — zero fois depuis
+// la mise en service. Avec 1500/350 declares valides, la 119 arrive. La forme etait juste
+// depuis la veille ; c'etaient les valeurs qui manquaient.
+//
+// ⚠️ 1500 et 350 sont les valeurs d'ouverture usuelles d'un classement Glicko-2, pas une
+// mesure. Elles marchent, ce qui ne veut pas dire qu'elles sont les bonnes.
+func valeursVersus() (bool, [2]note117) {
+	classe := false
+	notes := [2]note117{{0xFFFFFFFF, false}, {0xFFFFFFFF, false}}
+
+	b, err := os.ReadFile("/data/smm2_117.valeurs")
+	if err != nil {
+		return classe, notes
+	}
+
+	champs := strings.Split(strings.TrimSpace(string(b)), ",")
+	lire := func(i int) (uint32, bool) {
+		if i >= len(champs) {
+			return 0, false
+		}
+		n, err := strconv.ParseUint(strings.TrimSpace(champs[i]), 10, 32)
+
+		return uint32(n), err == nil
+	}
+	if v, ok := lire(0); ok {
+		classe = v != 0
+	}
+	for k := 0; k < 2; k++ {
+		if v, ok := lire(1 + 2*k); ok {
+			notes[k].valeur = v
+		}
+		if v, ok := lire(2 + 2*k); ok {
+			notes[k].valide = v != 0
+		}
+	}
+
+	return classe, notes
+}
+
+// smm2SearchCoursesBattleMode : la methode 77, le niveau que joue le mode VERSUS.
+//
+// IDENTIFIEE PAR LA FORME DE SON PARAMETRE, comme la 78 l'avait ete. Le corps recu fait
+// treize octets et se lit sans ambiguite :
+//
+//	00          version de structure
+//	08000000    longueur du corps
+//	3f000000    resultOption
+//	01000000    count
+//
+// soit exactement `SearchCoursesBattleModeParam { resultOption, count }`, la structure que
+// Ghidra avait nommee sans qu'on sache a quel numero elle appartenait. Sa reponse a la meme
+// signature que celles des 76 et 79 dans l'analyseur du client, ce qui confirme la famille :
+// c'est une recherche de niveaux.
+//
+// Mesure du 2026-09-02 : onze appels, tous repondus « liste vide » par le repli generique.
+// Le salon se formait a quatre, le percage NAT reussissait, et dix secondes plus tard
+// l'hote fermait la participation — la console n'avait aucun niveau a jouer. C'est le meme
+// echec que le cooperatif avant la 78, et il ne dit rien de lui-meme dans le journal.
+//
+// LE TIRAGE EST MEMORISE PAR PARTIE, pour la meme raison qu'en cooperatif : les quatre
+// joueurs interrogent chacun de leur cote a une seconde d'intervalle, et un tirage par
+// appel les enverrait dans quatre niveaux differents.
+func smm2SearchCoursesBattleMode(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
+	s := conn.Settings
+	in := nex.NewStreamIn(req.Body, s)
+	p := in
+	if s.StructHeader {
+		_ = in.U8()
+		p = in.Substream()
+	}
+	options := p.U32()
+	nombre := p.U32()
+	if err := p.Err(); err != nil {
+		fmt.Printf("[SMM2 Courses] search_courses_battle(77) : parametre illisible (%v) brut=%x\n", err, req.Body)
+
+		return nex.NewRMCError(s, 0x73, req.CallID, 0x00690002)
+	}
+
+	liste := niveauxChoisisPourPartie(conn.PID, nombre)
+
+	out := nex.NewStreamOut(s)
+	out.U32(uint32(len(liste)))
+	for _, m := range liste {
+		ecrireCourseInfo(out, m, options)
+	}
+
+	fmt.Printf("[SMM2 Courses] search_courses_battle(77) pid=%d options=0x%x demande=%d -> %d niveau(x)\n",
+		conn.PID, options, nombre, len(liste))
+
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
 }
