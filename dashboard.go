@@ -403,6 +403,63 @@ func startDashboard(endpoint *nex.Endpoint, mm *nex.Matchmaking) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"reaped": endpoint.ReapIdle(nex.ReapIdleTimeout())})
 	})
+	// --- Moderation des niveaux (voir smm2_moderation.go) ---------------------
+	//
+	// Meme porte que le reste : le DASH_TOKEN du serveur. C'est nexdash qui appelle ces
+	// routes, et c'est LUI qui decide qui a le droit de les declencher — ici on ne sait pas
+	// qui est derriere, seulement que l'appelant connait le jeton du serveur.
+	repondre := func(w http.ResponseWriter, v any) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		_ = json.NewEncoder(w).Encode(v)
+	}
+	mux.HandleFunc("/api/niveaux", func(w http.ResponseWriter, r *http.Request) {
+		if !authed(w, r) {
+			return
+		}
+		repondre(w, map[string]any{"niveaux": listerNiveauxModeration()})
+	})
+	mux.HandleFunc("/api/niveaux/quarantaine", func(w http.ResponseWriter, r *http.Request) {
+		if !authed(w, r) {
+			return
+		}
+		repondre(w, map[string]any{"quarantaine": listerQuarantaine()})
+	})
+	// POST seulement : une action qui change l'etat ne doit pas partir d'un simple lien,
+	// que le navigateur ou un aperçu de messagerie peut suivre tout seul.
+	mux.HandleFunc("/api/niveaux/retirer", func(w http.ResponseWriter, r *http.Request) {
+		if !authed(w, r) {
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST attendu", http.StatusMethodNotAllowed)
+			return
+		}
+		id, _ := strconv.ParseUint(r.URL.Query().Get("data_id"), 10, 64)
+		fiche, err := retirerNiveau(id, r.URL.Query().Get("motif"), r.URL.Query().Get("par"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		repondre(w, map[string]any{"retire": true, "data_id": fiche.DataID, "nom": fiche.Nom, "auteur": fiche.Auteur})
+	})
+	mux.HandleFunc("/api/niveaux/restaurer", func(w http.ResponseWriter, r *http.Request) {
+		if !authed(w, r) {
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST attendu", http.StatusMethodNotAllowed)
+			return
+		}
+		id, _ := strconv.ParseUint(r.URL.Query().Get("data_id"), 10, 64)
+		fiche, err := restaurerNiveau(id)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		repondre(w, map[string]any{"restaure": true, "data_id": fiche.DataID, "nom": fiche.Nom})
+	})
+
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { fmt.Fprintln(w, "ok") })
 
 	fmt.Printf("[SMM2 Dashboard] stats API on :%s (token=%v)\n", port, token != "")
