@@ -1,6 +1,6 @@
 // Command mk8 runs the Mario Kart 8 Deluxe online servers (auth + secure) on the
 // Nextendo NEX stack — our own closed-source NEX implementation, with
-// the previous stack code. It is the online server
+// the previous stack code. It is the transition target for closing the public
 // servers built on the previous stack.
 //
 // Two NEX servers run in one process:
@@ -143,7 +143,7 @@ func main() {
 	secureEndpoint.Register(nex.ProtocolNATTraversal, nex.NATTraversalHandler())
 	secureEndpoint.Register(nex.ProtocolRanking, nex.RankingHandler())
 	// SMM2: DataStore (0x73) + Utility (0x6E) are answered by the measured-response
-	// replay (the wire format) instead of the typed handlers that returned
+	// replay (measured values) instead of the typed handlers that returned
 	// NotImplemented and froze SMM2's online init. This REPLACES ProtocolUtility.
 	// Les reglages entiers de SMM2, poses AVANT que l'endpoint serve quoi que ce soit.
 	// Ils vivaient un instant dans startStorageServer, lancee en goroutine : la carte
@@ -233,10 +233,10 @@ func main() {
 	// prepare_post/get_object hand back URLs into it).
 	go startStorageServer()
 
-	// When the auth is fronted by a TLS-passthrough proxy (the reverse proxy on the shared
+	// When the auth is fronted by a TLS-passthrough proxy (a reverse-proxy on the shared
 	// :443), enable PROXY protocol so the auth sees the console's REAL IP — otherwise
 	// the IP-based PID inheritance misses the direct secure connection and the session
-	// gets a placeholder PID. Direct deployments (a host) leave it off.
+	// gets a placeholder PID. Direct deployments (a direct host) leave it off.
 	proxyProto := os.Getenv("NEXTENDO_PROXY_PROTOCOL") == "1"
 	go func() {
 		fmt.Printf("[SMM2 Auth] listening WSS :%d (proxyProto=%v, secure URL -> %s)\n", authPort, proxyProto, secureURL.String())
@@ -370,7 +370,7 @@ func nextendoPIDFromToken(s string) (uint64, bool) {
 	if !hmac.Equal([]byte(want), []byte(parts[1])) {
 		return 0, false
 	}
-	if revokedNexPayloads[string(raw)] { // jeton fuité (release 1.6.5-win) — refusé malgré une signature valide
+	if revokedNexPayloads[string(raw)] { // jeton revoque : refuse malgre une signature valide
 		return 0, false
 	}
 	f := strings.SplitN(string(raw), ".", 3) // pid.username.expiry

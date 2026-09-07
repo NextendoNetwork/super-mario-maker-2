@@ -3,8 +3,8 @@ package main
 // Dynamic profile — never serve a measured player's identity.
 //
 // The measured DataStore responses embed the REAL Nintendo player the measured was
-// taken from: sync_user_profile(49) returns the name "a player", and get_users(48)
-// returns 261 OTHER real users (names, Miis, maker codes). Replaying them leaked
+// taken from: sync_user_profile(49) returns the measured account name, and get_users(48)
+// returns hundreds of OTHER real users (names, Miis, maker codes). Replaying them leaked
 // those identities and showed the wrong pseudo on every Nextendo player's profile.
 //
 // Instead we keep ONE measured struct as a byte-exact TEMPLATE and rewrite only the
@@ -72,7 +72,7 @@ func pseudoOr(pid uint64) string {
 }
 
 // makerCode derives a stable 9-char SMM2-style code from a pid so we don't serve the
-// measured player's real maker code. Uses Nintendo's confusable-free code alphabet.
+// measured account's real maker code. Uses Nintendo's confusable-free code alphabet.
 func makerCode(pid uint64) string {
 	const alpha = "0123456789BCDFGHJKLMNPQRSTVWXY" // 30 chars, no vowels/confusables
 	x := (pid ^ 0x9e3779b97f4a7c15) * 0xff51afd7ed558ccd
@@ -141,7 +141,7 @@ func patchUserInfo(s *nex.Settings, tmpl []byte, pid uint64, name string) []byte
 // --- templates carved once from the measured get_users(48) blob ------------------
 
 var (
-	userInfoTemplate []byte // one byte-exact UserInfo (holly's), reused as a shell
+	userInfoTemplate []byte // one byte-exact UserInfo carved from the boot response, reused as a shell
 	resultSuccessTpl []byte // one byte-exact success Result element
 )
 

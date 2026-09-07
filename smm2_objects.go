@@ -5,6 +5,7 @@ package main
 // S3/CloudFront. These are what actually upload/download a course's level BLOB.
 
 import (
+	"os"
 	"bytes"
 	"fmt"
 	"strings"
@@ -40,12 +41,14 @@ func rewriteUploadHost(body []byte) []byte {
 }
 
 // capturedRelationPID is the pid embedded in every relation object key/name of the
-// measured (a player, 0 = 0xdeadbeefdeadbeef). The console builds
+// mesure sur un compte de reference. The console builds
 // its own asset under ITS pid, so a descriptor carrying a foreign pid is inconsistent
 // with what the console expects and it refuses to POST the relation (the course-data
 // key has no pid, which is why THAT upload goes through). We rewrite it to the caller's
 // pid — a same-length swap (u64 hex is always 16 chars), so no length fixups.
-const capturedRelationPID = "deadbeefdeadbeef"
+// Identifiant du compte de reference sur lequel la mesure a ete faite. Il ne vit pas
+// dans le code : sans la variable, la reecriture du descripteur est simplement sautee.
+var capturedRelationPID = os.Getenv("SMM2_RELATION_PID_TOKEN")
 
 // capturedRelationSize is the asset byte-size baked into each measured relation
 // descriptor's object name/key (as lowercase hex, e.g. "..._1ba5_..."). The console
