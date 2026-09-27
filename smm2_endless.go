@@ -102,10 +102,12 @@ func (m *magasinEndless) demarrer(pid uint64, difficulte uint8) {
 		p = &[4]partieEndless{}
 		m.parPID[pid] = p
 	}
+	recordActuel := p[difficulte].Record
 	p[difficulte] = partieEndless{
 		Mode:      2, // actif
 		Vies:      viesInitialesEndless[difficulte],
 		Reussites: 0,
+		Record:    recordActuel,
 	}
 	m.ecrireLocked()
 	m.mu.Unlock()
