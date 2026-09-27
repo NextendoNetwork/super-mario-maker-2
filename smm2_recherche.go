@@ -95,13 +95,29 @@ func parametreRecherche(s *nex.Settings, corps []byte) (options, depart, nombre 
 	return
 }
 
+func parPopularite(liste []*courseMeta) {
+	sort.SliceStable(liste, func(i, j int) bool {
+		pi := resultats.lire(liste[i].DataID).Parties
+		pj := resultats.lire(liste[j].DataID).Parties
+		if pi != pj {
+			return pi > pj
+		}
+		return liste[i].DataID > liste[j].DataID
+	})
+}
+
 // repondreNiveaux ecrit une liste de CourseInfo, avec ou sans le tableau de rangs que
 // certaines de ces methodes attendent en plus.
-func repondreNiveaux(conn *nex.Connection, req *nex.RMCMessage, nom string, avecRangs bool) *nex.RMCMessage {
+func repondreNiveaux(conn *nex.Connection, req *nex.RMCMessage, nom string, avecRangs bool, tri func([]*courseMeta)) *nex.RMCMessage {
 	s := conn.Settings
 	options, depart, nombre := parametreRecherche(s, req.Body)
 
-	liste := trancher(niveauxPublics(), depart, nombre)
+	base := niveauxPublics()
+	if tri != nil {
+		base = append([]*courseMeta{}, base...) // copia: no reordenar el catálogo compartido
+		tri(base)
+	}
+	liste := trancher(base, depart, nombre)
 
 	// Meme garde que pour les methodes 70 et 74 : sans SMM2_COURSEINFO=1, on ne sert
 	// aucune fiche. Ecrire une CourseInfo mal formee ne casse pas que la liste — le
@@ -135,12 +151,12 @@ func repondreNiveaux(conn *nex.Connection, req *nex.RMCMessage, nom string, avec
 
 // (73) SearchCoursesLatest — l'onglet « Nouveautes ».
 func smm2SearchCoursesLatest(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
-	return repondreNiveaux(conn, req, "search_courses_latest", false)
+	return repondreNiveaux(conn, req, "search_courses_latest", false, nil)
 }
 
 // (83) SearchCoursesTermsRanking et (58) — les onglets classes.
 func smm2SearchCoursesRanking(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
-	return repondreNiveaux(conn, req, "search_courses_ranking", true)
+	return repondreNiveaux(conn, req, "search_courses_ranking", true, parPopularite)
 }
 
 // (84) SearchCoursesPickUp — « A la une ». Liste seule, sans rangs ni booleen final.
@@ -192,10 +208,7 @@ func smm2SearchCoursesEndlessMode(conn *nex.Connection, req *nex.RMCMessage) *ne
 	// de niveaux qu'apres avoir initialise la partie.
 	SondeAcceptee(79, 109)
 
-	liste := niveauxPublics()
-	if nombre > 0 && nombre < uint32(len(liste)) {
-		liste = liste[:nombre]
-	}
+	liste := reserveEndless(conn.PID, difficulte, nombre)
 	if os.Getenv("SMM2_COURSEINFO") != "1" {
 		liste = nil
 	}
@@ -427,6 +440,26 @@ func niveauxChoisisPourPartie(pid uint64, combien uint32) []*courseMeta {
 	}
 	choixParties[gid] = choixPartie{niveaux: melange, quand: time.Now()}
 	return melange[:combien]
+}
+
+// reserveEndless : tirage propre au mode sans fin, distinct de l'ordre d'Explore et
+// memorise par joueur+difficulte pour la duree d'une session (meme logique que
+// niveauxChoisisPourPartie, mais sans partager la table du multijoueur).
+func reserveEndless(pid uint64, difficulte uint8, combien uint32) []*courseMeta {
+	tous := niveauxPublics()
+	if len(tous) == 0 {
+		return nil
+	}
+	melange := make([]*courseMeta, len(tous))
+	copy(melange, tous)
+	for i := len(melange) - 1; i > 0; i-- {
+		j := rand.Intn(i + 1)
+		melange[i], melange[j] = melange[j], melange[i]
+	}
+	if combien > 0 && combien < uint32(len(melange)) {
+		melange = melange[:combien]
+	}
+	return melange
 }
 
 // smm2SearchCoursesAdvanced : la methode 72, la RECHERCHE AVANCEE de Course World.
