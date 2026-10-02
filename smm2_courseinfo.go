@@ -123,31 +123,13 @@ func ecrireCourseInfo(out *nex.StreamOut, c *courseMeta, options uint32) {
 			func(o *nex.StreamOut, k uint8) { o.U8(k) },
 			func(o *nex.StreamOut, v uint32) { o.U32(v) })
 	}
-	// LA TABLE DES NOTES : 0 coeurs, 1 bouh, 2 un DIVISEUR.
-	//
-	// Vide, le jeu desactive les boutons J'aime / Bouh : il n'envoie meme pas la 104.
-	// Remplie a zero (2026-10-02), il PLANTAIT a l'entree de Course World : la cle 2 est
-	// un denominateur. Chez Nintendo elle n'est jamais nulle, toujours superieure a
-	// coeurs + bouh, et vaut 0,84 a 1,24 fois le nombre de joueurs du niveau (cinq
-	// niveaux mesures). On y met donc les parties jouees, jamais moins que les notes, et
-	// jamais moins que un.
-	{
-		aime, bouh, _ := notes.compte(c.DataID)
-		base := r.Parties
-		if base < aime+bouh {
-			base = aime + bouh
-		}
-		if base < 1 {
-			base = 1
-		}
-		f.U32(3)
-		f.U8(0)
-		f.U32(aime)
-		f.U8(1)
-		f.U32(bouh)
-		f.U8(2)
-		f.U32(base)
-	}
+	// LA TABLE DES NOTES RESTE VIDE. Le 2026-10-02 on l'a remplie — {0: coeurs, 1: bouh,
+	// 2: sans note}, tous a zero puisque personne n'avait encore note — et le jeu PLANTAIT
+	// a l'entree de Course World, juste apres la 84 (deux fois sur deux, retour arriere
+	// immediat). Une table vide, il la lit comme « pas de donnee ». Le sens de la cle 2
+	// n'est pas connu et le jeu s'en sert vraisemblablement comme diviseur : on ne la
+	// remplira qu'apres l'avoir mesuree. Les notes restent ENREGISTREES (smm2_notes.go).
+	vide() // Ratings
 	vide() // Unk4
 	{
 		// CourseTimeStats : PID, PID, Uint32, Uint32 — pas trois Uint32 comme je l'avais
