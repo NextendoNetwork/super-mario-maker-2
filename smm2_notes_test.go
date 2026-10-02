@@ -114,14 +114,24 @@ func TestCourseInfoNotesJamaisDiviseurNul(t *testing.T) {
 		p.U16()
 		p.U16()
 		p.QBuffer()
-		for n := p.U32(); n > 0; n-- { // statistiques
-			p.U8()
+		// Statistiques : les cinq cles, dans l'ordre (mesure Nintendo).
+		if n := p.U32(); n != 5 {
+			t.Fatalf("statistiques : %d cle(s), Nintendo en envoie 5", n)
+		}
+		for i := uint8(0); i < 5; i++ {
+			if k := p.U8(); k != i {
+				t.Fatalf("statistiques : cle %d en position %d", k, i)
+			}
 			p.U32()
 		}
 		m := map[uint8]uint32{}
 		for n := p.U32(); n > 0; n-- {
 			k := p.U8()
 			m[k] = p.U32()
+		}
+		// Table 0x40 : cles 0 et 1 (mesure Nintendo).
+		if n := p.U32(); n != 2 || p.U8() != 0 {
+			t.Fatalf("table 0x40 : %d cle(s), Nintendo en envoie 2", n)
 		}
 		if p.Err() != nil {
 			t.Fatal(p.Err())
