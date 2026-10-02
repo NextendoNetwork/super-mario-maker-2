@@ -110,20 +110,18 @@ func ecrireCourseInfo(out *nex.StreamOut, c *courseMeta, options uint32) {
 	f.QBuffer(nil)
 
 	// --- champs conditionnels, dans l'ordre EXACT du tableau documente ---
+	vide := func() {
+		nex.WriteMap(f, map[uint8]uint32{}, func(o *nex.StreamOut, k uint8) { o.U8(k) }, func(o *nex.StreamOut, v uint32) { o.U32(v) })
+	}
 	r := resultats.lire(c.DataID)
 	{
 		// Cles documentees : 0 parties, 1 tentatives, 3 reussites. On n'ecrit que
 		// celles dont on connait le sens ; les cles 2 et 4 restent absentes plutot que
 		// remplies de zeros qui affirmeraient « zero partie en versus » alors qu'on ne
 		// compte simplement pas ce mode.
-		//
-		// MAIS LES CINQ CLES Y SONT TOUJOURS chez Nintendo (cinq fiches mesurees le
-		// 2026-10-02), dans l'ordre, la 2 et la 4 valant 0 dans quatre fiches sur cinq.
-		// Il en manquait deux : sans consequence tant que la table des notes etait vide,
-		// mais des qu'elle est remplie le jeu calcule avec ces tables et PLANTE a
-		// l'entree de Course World. Ecrites dans l'ordre, et non par WriteMap, qui suit
-		// l'ordre aleatoire des cartes Go.
-		ecrireTable(f, []uint32{r.Parties, r.Tentatives, 0, r.Reussites, 0})
+		nex.WriteMap(f, map[uint8]uint32{0: r.Parties, 1: r.Tentatives, 3: r.Reussites},
+			func(o *nex.StreamOut, k uint8) { o.U8(k) },
+			func(o *nex.StreamOut, v uint32) { o.U32(v) })
 	}
 	// LA TABLE DES NOTES : 0 coeurs, 1 bouh, 2 un DIVISEUR.
 	//
@@ -150,9 +148,7 @@ func ecrireCourseInfo(out *nex.StreamOut, c *courseMeta, options uint32) {
 		f.U8(2)
 		f.U32(base)
 	}
-	// Table de l'option 0x40 : deux cles, 0 et 1, chez Nintendo dans les cinq fiches,
-	// {0: 0, 1: 0} dans l'une d'elles. Vide, meme risque que ci-dessus.
-	ecrireTable(f, []uint32{0, 0})
+	vide() // Unk4
 	{
 		// CourseTimeStats : PID, PID, Uint32, Uint32 — pas trois Uint32 comme je l'avais
 		// ecrit de tete. Sur Switch un PID fait huit octets, donc mon erreur decalait la
@@ -246,15 +242,6 @@ func ecrireMiniature(out *nex.StreamOut, c *courseMeta, relType uint8) {
 		return
 	}
 	out.Write(r.Bytes())
-}
-
-// ecrireTable ecrit une Map<Uint8, Uint32> aux cles 0, 1, 2… DANS L'ORDRE, comme Nintendo.
-func ecrireTable(f *nex.StreamOut, valeurs []uint32) {
-	f.U32(uint32(len(valeurs)))
-	for i, v := range valeurs {
-		f.U8(uint8(i))
-		f.U32(v)
-	}
 }
 
 // tagOuZero rend l'etiquette n, en code numerique.
