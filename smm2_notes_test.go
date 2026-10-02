@@ -85,40 +85,56 @@ func TestNotesDepuisLa104(t *testing.T) {
 	}
 }
 
-// TestCourseInfoNotesVides : la table des notes de CourseInfo reste VIDE, meme quand des
-// notes existent. Remplie, elle faisait planter le jeu a l'entree de Course World
-// (2026-10-02, apres la 84). On cherche l'octet de la table : stats (5 cles, 29 octets
-// apres le compte) puis la table des notes, qui doit etre un compte nul.
-func TestCourseInfoNotesVides(t *testing.T) {
+// TestCourseInfoNotesJamaisDiviseurNul : la table des notes de CourseInfo porte les
+// coeurs et les bouh, et sa cle 2 n'est JAMAIS nulle ni inferieure aux notes. A zero, le
+// jeu plantait a l'entree de Course World (2026-10-02, apres la 84) ; vide, il
+// desactivait les boutons.
+func TestCourseInfoNotesJamaisDiviseurNul(t *testing.T) {
 	defer isolerNotes(t)()
 	s := nex.NewSwitchSettings(accessKey, nexVersion)
-	notes.noter(77, 1, noteAime)
-	out := nex.NewStreamOut(s)
-	ecrireCourseInfo(out, &courseMeta{DataID: 77, Name: "n"}, 0x1ff)
-	in := nex.NewStreamIn(out.Bytes(), s)
-	_ = in.U8()
-	p := in.Substream()
-	p.U64()
-	_ = p.String()
-	p.PID()
-	_ = p.String()
-	_ = p.String()
-	p.U8()
-	p.U8()
-	p.DateTime()
-	p.U8()
-	p.U8()
-	p.U8()
-	p.U8()
-	p.U32()
-	p.U16()
-	p.U16()
-	p.QBuffer()
-	for n := p.U32(); n > 0; n-- { // statistiques
+	table := func(dataID uint64) map[uint8]uint32 {
+		out := nex.NewStreamOut(s)
+		ecrireCourseInfo(out, &courseMeta{DataID: dataID, Name: "n"}, 0x1ff)
+		in := nex.NewStreamIn(out.Bytes(), s)
+		_ = in.U8()
+		p := in.Substream()
+		p.U64()
+		_ = p.String()
+		p.PID()
+		_ = p.String()
+		_ = p.String()
+		p.U8()
+		p.U8()
+		p.DateTime()
+		p.U8()
+		p.U8()
+		p.U8()
 		p.U8()
 		p.U32()
+		p.U16()
+		p.U16()
+		p.QBuffer()
+		for n := p.U32(); n > 0; n-- { // statistiques
+			p.U8()
+			p.U32()
+		}
+		m := map[uint8]uint32{}
+		for n := p.U32(); n > 0; n-- {
+			k := p.U8()
+			m[k] = p.U32()
+		}
+		if p.Err() != nil {
+			t.Fatal(p.Err())
+		}
+		return m
 	}
-	if n := p.U32(); n != 0 || p.Err() != nil {
-		t.Fatalf("table des notes : %d entree(s) (err %v), attendu vide", n, p.Err())
+	if m := table(76); m[2] < 1 || len(m) != 3 {
+		t.Fatalf("niveau sans note ni partie : %v, attendu trois cles et un diviseur >= 1", m)
+	}
+	notes.noter(77, 1, noteAime)
+	notes.noter(77, 2, noteAime)
+	notes.noter(77, 3, noteBouh)
+	if m := table(77); m[0] != 2 || m[1] != 1 || m[2] < 3 {
+		t.Fatalf("niveau note : %v, attendu 2 coeurs, 1 bouh, diviseur >= 3", m)
 	}
 }
