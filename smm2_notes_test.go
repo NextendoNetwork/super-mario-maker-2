@@ -84,3 +84,41 @@ func TestNotesDepuisLa104(t *testing.T) {
 		t.Fatalf("quota du joueur 2 : %d", notes.restantes(2))
 	}
 }
+
+// TestCourseInfoNotesVides : la table des notes de CourseInfo reste VIDE, meme quand des
+// notes existent. Remplie, elle faisait planter le jeu a l'entree de Course World
+// (2026-10-02, apres la 84). On cherche l'octet de la table : stats (5 cles, 29 octets
+// apres le compte) puis la table des notes, qui doit etre un compte nul.
+func TestCourseInfoNotesVides(t *testing.T) {
+	defer isolerNotes(t)()
+	s := nex.NewSwitchSettings(accessKey, nexVersion)
+	notes.noter(77, 1, noteAime)
+	out := nex.NewStreamOut(s)
+	ecrireCourseInfo(out, &courseMeta{DataID: 77, Name: "n"}, 0x1ff)
+	in := nex.NewStreamIn(out.Bytes(), s)
+	_ = in.U8()
+	p := in.Substream()
+	p.U64()
+	_ = p.String()
+	p.PID()
+	_ = p.String()
+	_ = p.String()
+	p.U8()
+	p.U8()
+	p.DateTime()
+	p.U8()
+	p.U8()
+	p.U8()
+	p.U8()
+	p.U32()
+	p.U16()
+	p.U16()
+	p.QBuffer()
+	for n := p.U32(); n > 0; n-- { // statistiques
+		p.U8()
+		p.U32()
+	}
+	if n := p.U32(); n != 0 || p.Err() != nil {
+		t.Fatalf("table des notes : %d entree(s) (err %v), attendu vide", n, p.Err())
+	}
+}
