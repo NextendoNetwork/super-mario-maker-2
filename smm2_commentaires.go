@@ -144,7 +144,7 @@ func (m *magasinCommentaires) ajouter(c commentaire) int {
 //
 // On cree donc une entree, sans texte. Et on verifie qu'on ne l'a pas deja creee : le
 // jeu confirme parfois deux fois le meme envoi, ce qui afficherait le dessin en double.
-func (m *magasinCommentaires) ajouterDessin(dataID, pid, image uint64, taille uint32) int {
+func (m *magasinCommentaires) ajouterDessin(dataID, pid, image uint64, taille uint32, x, y uint16, sousMonde bool) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	// Deja rattache : le jeu confirme parfois deux fois le meme televersement, et
@@ -156,6 +156,7 @@ func (m *magasinCommentaires) ajouterDessin(dataID, pid, image uint64, taille ui
 	}
 	m.parNiv[dataID] = append(m.parNiv[dataID], commentaire{
 		DataID: dataID, PID: pid, Image: image, TailleImg: taille, Quand: nowUnix(),
+		X: x, Y: y, SousMonde: sousMonde,
 	})
 	m.ecrireLocked()
 	return len(m.parNiv[dataID])
@@ -237,78 +238,43 @@ func timeUnixUTC(unix int64) time.Time { return time.Unix(unix, 0).UTC() }
 
 // ecrireCommentInfo serialise un commentaire.
 //
-// LA FORME EST SURE, LE CONTENU NON. Les dix-sept champs et leurs types viennent de la
-// bibliotheque de kinnay (CommentInfo.save), qui est la reference publique la plus
-// complete — donc la structure sera acceptee par le client. Ce que personne ne
-// documente, c'est le SENS de chaque champ : tous s'appellent « unk ». On ne sait donc
-// pas lequel porte le texte du commentaire ni lequel le nom de son auteur.
+// MESURE CHEZ NINTENDO le 2026-10-02 (capturas-smm2, quatre CommentInfo dans les 95) :
 //
-// Cette distinction est ce qui rend l'essai sans danger. Une forme fausse fait rejeter
-// TOUTE la reponse — on l'a paye trois fois cette nuit. Un contenu mal place affiche au
-// pire le texte a la place du pseudo, ce qui se voit et se corrige d'un `echo` :
+//	unk1   Uint64   le data_id du NIVEAU — pas un identifiant de commentaire
+//	unk2   String   l'identifiant du commentaire :
+//	                <AAAAMMJJhhmmss + 6 chiffres>_<PID auteur en hex>_<data_id en hex>
+//	unk3   Uint8    0 ou 1, sens inconnu ; on garde 0, qui s'affiche
+//	unk4   Uint8    le TYPE : 1 texte, 2 tampon, 0 dessin
+//	unk5   Uint64   le PID de l'auteur
+//	unk6/7 Uint16   la position X, Y dans le niveau
+//	unk14  qBuffer  VIDE chez Nintendo
+//	unk15  String   le texte
+//	unk16  Uint16   le numero du tampon
 //
-//	echo 0 > /opt/smm2/smm2_9997.forme   -> texte dans unk2, auteur dans unk15 (defaut)
-//	echo 1 > ...                         -> l'inverse
-//	echo 2 > ...                         -> texte dans les deux (pour voir lequel sort)
+// Nous mettions un compteur dans unk1, le pseudo dans unk2, une position nulle et le Mii
+// dans unk14. Le type (0,1) pour le texte, trouve en balayant les combinaisons, est
+// confirme ; celui du dessin, (0,0), aussi par elimination.
 func ecrireCommentInfo(out *nex.StreamOut, c commentaire, i int) {
 	s := out.Settings
-	// TEXTE DANS unk15, PSEUDO DANS unk2. Determine le 2026-08-24 en mettant le pseudo
-	// dans l'un et le texte dans l'autre : le jeu affichait « Juanjo » a la place du
-	// commentaire. Aucune source publique ne nomme ces deux champs.
-	variante := formeEssai(9997, 1)
-
-	pseudo := nex.SMM2PseudoDe(c.PID)
-	texteA, texteB := c.Texte, pseudo
-	switch variante {
-	case 1:
-		texteA, texteB = pseudo, c.Texte
-	case 2:
-		texteA, texteB = c.Texte, c.Texte
-	}
+	unk3, unk4 := typeCommentaire(c)
+	image, tailleImg := imageDuCommentaire(c)
 
 	f := nex.NewStreamOut(s)
-	f.U64(uint64(1_000_000 + i)) // unk1 : un identifiant propre au commentaire
-	f.String(texteA)             // unk2
-	// unk3 ET unk4 : deux Uint8 juste apres la premiere chaine, et l'un des deux est
-	// tres probablement le TYPE du commentaire — texte, tampon, ou image.
-	//
-	// Le jeu affichait trois cadres vides avec une frimousse triste : c'est sa facon de
-	// dire « ce commentaire est une image et je ne la trouve pas ». Il ne rejetait pas
-	// la reponse — la forme etait donc bonne — il lisait un type qui n'est pas « texte ».
-	// Comme nous envoyions zero aux deux, zero ne veut pas dire texte.
-	//
-	// L'espace a fouiller est minuscule, d'ou un commutateur plutot qu'une supposition :
-	//   echo 0 > /opt/smm2/smm2_9996.forme   -> (0,0) comportement precedent
-	//   echo 1 > ...                         -> (1,0)      <- defaut
-	//   echo 2 > ...                         -> (0,1)
-	//   echo 3 > ...                         -> (1,1)
-	//   echo 4 > ...                         -> (2,0)
-	//   echo 5 > ...                         -> (0,2)
-	//   echo 6 > ...                         -> (3,0)
-	// Un commentaire DESSINE n'a pas le meme type qu'un commentaire texte : (0,1) rend
-	// bien le texte, et le dessin reste invisible avec la meme valeur. Comme il n'y en a
-	// qu'UN pour l'instant, on ne peut pas comparer plusieurs combinaisons d'un coup —
-	// alors elle AVANCE a chaque consultation. Le joueur ouvre la liste, sort, revient,
-	// et voit une combinaison differente a chaque fois ; le journal ecrit laquelle.
-	var unk3, unk4 uint8
-	if c.Image != 0 {
-		unk3, unk4 = typeDessinSuivant()
-	} else {
-		unk3, unk4 = typeCommentaire(i)
-	}
+	f.U64(c.DataID)
+	f.String(identifiantCommentaire(c, i))
 	f.U8(unk3)
 	f.U8(unk4)
-	f.U64(c.PID)  // unk5 : vraisemblablement l'auteur
-	f.U16(0)      // unk6
-	f.U16(0)      // unk7
+	f.U64(c.PID)
+	f.U16(c.X)
+	f.U16(c.Y)
 	f.U8(0)       // unk8
 	f.U8(0)       // unk9
 	f.U16(0)      // unk10
 	f.Bool(false) // unk11
 	f.Bool(false) // unk12
 	f.DateTime(uint64(nex.MakeDateTime(dateDe(c.Quand))))
-	f.QBuffer(nex.SMM2MiiDe(c.PID)) // unk14 : vraisemblablement le Mii de l'auteur
-	f.String(texteB)                // unk15
+	f.QBuffer(nil) // unk14 : vide chez Nintendo
+	f.String(c.Texte)
 
 	// La structure de l'image : imbriquee, donc sa propre en-tete.
 	//
@@ -319,22 +285,21 @@ func ecrireCommentInfo(out *nex.StreamOut, c commentaire, i int) {
 	// Une adresse vide quand le commentaire n'a pas de dessin n'est pas un trou : c'est
 	// la verite, et le jeu ne va rien chercher.
 	pic := nex.NewStreamOut(s)
-	if c.Image != 0 {
-		pic.String(fmt.Sprintf("%s/object/%d", storageURL, c.Image))
+	if image != 0 {
+		pic.String(fmt.Sprintf("%s/object/%d", storageURL, image))
 		pic.U8(10) // type de donnee : /ds/1/comment/ selon la documentation
-		pic.U32(c.TailleImg)
+		pic.U32(tailleImg)
 		pic.Buffer(courses.rootCA)
-		pic.String(fmt.Sprintf("%d.bin", c.Image))
+		pic.String(fmt.Sprintf("%d.bin", image))
 	} else {
-		// Chaines vides en longueur ZERO, comme ocw-server. Nous ecrivions longueur 1
-		// et un terminateur nul : un octet de trop, DEUX fois dans cette structure. Le
-		// meme ecart d'un octet decalait tout UserInfo, et c'est peut-etre ce qui
-		// empechait le jeu d'aller chercher les dessins.
-		pic.StringVideZero("")
+		// Chaines vides en longueur UN — un terminateur nul —, mesure chez Nintendo le
+		// 2026-10-02 : 0100 00 · 00 · 00000000 · 00000000 · 0100 00, quinze octets. On
+		// les ecrivait en longueur zero d'apres ocw-server ; la mesure gagne.
+		pic.String("")
 		pic.U8(0)
 		pic.U32(0)
 		pic.Buffer(nil)
-		pic.StringVideZero("")
+		pic.String("")
 	}
 	if s.StructHeader {
 		f.U8(0)
@@ -343,8 +308,8 @@ func ecrireCommentInfo(out *nex.StreamOut, c commentaire, i int) {
 		f.Write(pic.Bytes())
 	}
 
-	f.U16(0) // unk16
-	f.U8(0)  // unk17
+	f.U16(c.Tampon) // unk16 : le numero du tampon
+	f.U8(0)         // unk17
 
 	if s.StructHeader {
 		out.U8(0)
@@ -368,9 +333,14 @@ func dateDe(unix int64) (an, mois, jour, heure, minute, seconde int) {
 func smm2SearchComments(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
 	s := conn.Settings
 
+	// La 95 recoit un Uint64 NU, la 94 une structure (data_id + ResultRange) : documente
+	// chez kinnay et mesure chez Nintendo le 2026-10-02 (c442 : huit octets, le data_id,
+	// rien d'autre). Lire la 95 comme une structure prenait le premier octet du data_id
+	// pour une version, ses quatre suivants pour une longueur, et rendait les
+	// commentaires du niveau 0 : aucun. C'est la liste que le jeu affiche DANS le niveau.
 	in := nex.NewStreamIn(req.Body, s)
 	p := in
-	if s.StructHeader {
+	if req.Method == 94 && s.StructHeader {
 		_ = in.U8()
 		p = in.Substream()
 	}
@@ -394,37 +364,47 @@ func smm2SearchComments(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessa
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
 }
 
-// combinaisonsType : les couples (unk3, unk4) a essayer, dans l'ordre.
-var combinaisonsType = [][2]uint8{
-	{0, 0}, {1, 0}, {0, 1}, {1, 1}, {2, 0}, {0, 2}, {3, 0}, {0, 3}, {2, 1}, {1, 2},
+// typeCommentaire rend (unk3, unk4). unk4 est le type, mesure chez Nintendo : 1 texte,
+// 2 tampon ; 0 pour un dessin, par elimination et parce que c'est la valeur avec laquelle
+// le jeu essayait de telecharger l'image.
+func typeCommentaire(c commentaire) (uint8, uint8) {
+	switch {
+	case c.Image != 0:
+		return 0, 0
+	case c.Tampon != 0:
+		return 0, 2
+	default:
+		return 0, 1
+	}
 }
 
-// typeCommentaire rend le couple a employer pour le commentaire d'indice i.
+// identifiantCommentaire : la forme de Nintendo, <date + 6 chiffres>_<auteur>_<niveau>.
+// Les six chiffres sont les microsecondes chez Nintendo ; nous ne gardons que la seconde,
+// donc on y met le rang du commentaire, ce qui suffit a rendre l'identifiant unique.
+func identifiantCommentaire(c commentaire, i int) string {
+	an, mois, jour, h, mi, se := dateDe(c.Quand)
+	return fmt.Sprintf("%04d%02d%02d%02d%02d%02d%06d_%x_%x", an, mois, jour, h, mi, se, i%1000000, c.PID, c.DataID)
+}
+
+// imageDuCommentaire rend l'objet a servir pour un dessin.
 //
-// MODE EVENTAIL (defaut). Plutot que d'essayer une combinaison a la fois — un aller-
-// retour avec la console pour chacune —, on en donne une DIFFERENTE a chaque
-// commentaire de la liste. Le joueur en a trois : il voit trois essais d'un coup et dit
-// lequel s'affiche. Le journal ecrit la correspondance, donc on n'a rien a recouper de
-// tete.
-//
-// Une valeur fixe reste possible une fois le bon couple connu :
-//
-//	echo 3 > /opt/smm2/smm2_9996.forme   -> tous les commentaires en combinaison 3
-//	echo -1 > ...                        -> eventail (defaut)
-func typeCommentaire(i int) (uint8, uint8) {
-	// (0,1) = COMMENTAIRE TEXTE. Trouve en donnant une combinaison differente a chaque
-	// commentaire de la liste et en regardant lequel s'affichait. On sait aussi, par le
-	// meme balayage, que (x,2) est un TAMPON et (x,0) une IMAGE.
-	n := formeEssai(9996, 2)
-	if n < 0 {
-		n = i % len(combinaisonsType)
+// Les dessins enregistres AVANT la correction de la 90 designent la MINIATURE DE
+// SIGNALEMENT (le JPEG de la 132) au lieu du dessin. Celui-ci est l'objet alloue juste
+// avant, nomme rel-<niveau>-10 : on le reprend ici plutot que de reecrire le fichier.
+func imageDuCommentaire(c commentaire) (uint64, uint32) {
+	if c.Image == 0 {
+		return 0, 0
 	}
-	if n >= len(combinaisonsType) {
-		n = 0
+	attendu := fmt.Sprintf("rel-%d-10", c.DataID)
+	courses.mu.RLock()
+	defer courses.mu.RUnlock()
+	if m := courses.byID[c.Image]; m != nil && m.Name == attendu {
+		return c.Image, c.TailleImg
 	}
-	c := combinaisonsType[n]
-	fmt.Printf("[SMM2 Commentaires]   commentaire %d -> combinaison %d = (%d,%d)\n", i, n, c[0], c[1])
-	return c[0], c[1]
+	if m := courses.byID[c.Image-1]; m != nil && m.Name == attendu {
+		return c.Image - 1, m.Size
+	}
+	return c.Image, c.TailleImg
 }
 
 // smm2PreparePostObjectCommentPicture (88) : le joueur envoie un commentaire DESSINE.
@@ -447,11 +427,17 @@ func smm2PreparePostObjectCommentPicture(conn *nex.Connection, req *nex.RMCMessa
 	in := nex.NewStreamIn(req.Body, s)
 	_ = in.U8()
 	p := in.Substream()
-	dataID := p.U64()
-	_ = in.U32() // 12 : sens inconnu
-	taille := in.U32()
+	champs, _ := lirePosteCommentaire(p)
+	dataID := champs.DataID
+	// Puis une SECONDE structure, de douze octets : la taille du dessin, 64, 0 (mesure
+	// chez Nintendo le 2026-10-02, c446 : 00 0c000000 13020000 40000000 00000000). On
+	// lisait son en-tete comme deux Uint32 — « 12 » puis une taille decalee d'un octet,
+	// 531 devenant 135936.
+	_ = in.U8()
+	q := in.Substream()
+	taille := q.U32()
 
-	if err := in.Err(); err != nil || taille == 0 || taille > 8<<20 {
+	if err := q.Err(); err != nil || taille == 0 || taille > 8<<20 {
 		// Une taille absurde signale une lecture fausse, pas un dessin geant. On refuse
 		// plutot que d'allouer un objet a partir d'un nombre qu'on ne comprend pas.
 		fmt.Printf("[SMM2 Commentaires] prepare_picture(88) pid=%d : parametre douteux (taille=%d, err=%v)\n",
@@ -461,6 +447,8 @@ func smm2PreparePostObjectCommentPicture(conn *nex.Connection, req *nex.RMCMessa
 
 	id := courses.alloc(conn.PID, fmt.Sprintf("rel-%d-10", dataID), 10, nil, nil, taille)
 	url := fmt.Sprintf("%s/object/%d", storageURL, id)
+	dessinsEnAttente.Store(id, dessinEnAttente{Niveau: dataID, PID: conn.PID, Taille: taille,
+		X: champs.X, Y: champs.Y, SousMonde: champs.SousMonde})
 
 	body := nex.NewStreamOut(s)
 	body.String(fmt.Sprintf("%d", id))
@@ -474,82 +462,65 @@ func smm2PreparePostObjectCommentPicture(conn *nex.Connection, req *nex.RMCMessa
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, frameStruct(s, 0, body.Bytes()))
 }
 
+// dessinEnAttente : ce que la 88 sait d'un dessin et que la 90 doit rattacher.
+type dessinEnAttente struct {
+	Niveau    uint64
+	PID       uint64
+	Taille    uint32
+	X, Y      uint16
+	SousMonde bool
+}
+
+// dessinsEnAttente : objet alloue par la 88 -> dessin. En memoire : la 90 suit la 88 de
+// quelques secondes.
+var dessinsEnAttente sync.Map
+
 // smm2CompletePostObjectCommentPicture (89 et 90) : le dessin est arrive en entier.
 //
-// C'est ici qu'on peut enfin le rattacher a un commentaire : l'image est sur le disque
-// et sa taille est connue. On cherche le JPEG parmi les objets que ce joueur vient de
-// televerser — un dessin en produit DEUX, les traits compresses en zlib et leur rendu,
-// et c'est le rendu que le jeu affiche.
+// MESURE CHEZ NINTENDO le 2026-10-02 (capturas-smm2 c446, c450, c453). La sequence est :
+//
+//	88   preparer le DESSIN          -> une clef et un formulaire de televersement
+//	132  preparer une autre image    -> « report-thumbnail_… » : la miniature de SIGNALEMENT
+//	90   confirmer : la clef de la 88, la clef de la 132, puis le parametre de la 88
+//
+// Le dessin est donc l'objet de la 88, designe par la PREMIERE chaine de la 90. Nous
+// prenions « le JPEG le plus recent du joueur » — c'est-a-dire la miniature de
+// signalement de la 132 — et le jeu, qui attend le dessin, chargeait sans fin.
 func smm2CompletePostObjectCommentPicture(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
-	image, taille, niveau := dernierDessinDe(conn.PID)
-	if image != 0 && niveau != 0 {
-		if n := commentaires.ajouterDessin(niveau, conn.PID, image, taille); n > 0 {
-			fmt.Printf("[SMM2 Commentaires] dessin %d (%d octets) de pid=%d sur le niveau %d -> %d commentaire(s)\n",
-				image, taille, conn.PID, niveau, n)
-		}
+	s := conn.Settings
+	in := nex.NewStreamIn(req.Body, s)
+	p := in
+	if s.StructHeader {
+		_ = in.U8()
+		p = in.Substream()
 	}
-	return smm2CompletePostObject(conn, req)
-}
+	clef := p.String()
+	signalement := p.String()
 
-// dernierDessinDe cherche le JPEG le plus recent televerse par ce joueur pour un
-// commentaire. On reconnait le JPEG a ses premiers octets plutot qu'a sa taille : les
-// traits compresses commencent par 78da (zlib), le rendu par ffd8 (JPEG), et se fier a
-// la taille marcherait jusqu'au jour ou un dessin serait plus petit que ses traits.
-func dernierDessinDe(pid uint64) (uint64, uint32, uint64) {
-	var meilleur, niveau uint64
-	var taille uint32
-	courses.mu.RLock()
-	for id, m := range courses.byID {
-		if m.OwnerPID != pid || typeRelation(m.Name) != 10 {
-			continue
-		}
-		// L'objet du dessin suit immediatement celui des traits.
-		for _, cand := range []uint64{id, id + 1} {
-			b, err := os.ReadFile(blobPath(cand))
-			if err != nil || len(b) < 4 || b[0] != 0xFF || b[1] != 0xD8 {
-				continue
-			}
-			if cand >= meilleur {
-				meilleur, taille = cand, uint32(len(b))
-				fmt.Sscanf(m.Name, "rel-%d-10", &niveau)
-			}
-		}
+	var objet uint64
+	if _, err := fmt.Sscanf(clef, "%d", &objet); err != nil || p.Err() != nil {
+		fmt.Printf("[SMM2 Commentaires] complete_picture(%d) pid=%d : clef illisible %q (%v)\n", req.Method, conn.PID, clef, p.Err())
+		return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
 	}
-	courses.mu.RUnlock()
-	return meilleur, taille, niveau
-}
-
-// combinaisonsDessin : les couples (unk3, unk4) a essayer pour un commentaire dessine.
-// (0,1) est exclu : c'est celui du texte, et il laisse le dessin invisible.
-var combinaisonsDessin = [][2]uint8{
-	{0, 2}, {1, 1}, {0, 3}, {2, 0}, {1, 2}, {1, 0}, {2, 1}, {0, 0}, {3, 0}, {2, 2},
-}
-
-var compteurDessin int
-var compteurDessinMu sync.Mutex
-
-// typeDessinSuivant rend la combinaison suivante, et la dit dans le journal.
-//
-// Une valeur fixe reste possible une fois la bonne connue :
-//
-//	echo 3 > /opt/smm2/smm2_9995.forme   -> toujours la combinaison 3
-//	echo -1 > ...                        -> balayage (defaut)
-func typeDessinSuivant() (uint8, uint8) {
-	// (0,0) = IMAGE. Le « cadre qui charge sans fin » etait le jeu qui essayait de la
-	// telecharger : le type etait donc deja bon, et c'est l'adresse qui ne lui suffit pas.
-	n := formeEssai(9995, 7)
-	if n < 0 {
-		compteurDessinMu.Lock()
-		n = compteurDessin % len(combinaisonsDessin)
-		compteurDessin++
-		compteurDessinMu.Unlock()
+	v, ok := dessinsEnAttente.LoadAndDelete(objet)
+	if !ok {
+		fmt.Printf("[SMM2 Commentaires] complete_picture(%d) pid=%d objet=%d : aucune 88 correspondante\n", req.Method, conn.PID, objet)
+		return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
 	}
-	if n >= len(combinaisonsDessin) {
-		n = 0
+	d := v.(dessinEnAttente)
+	if d.PID != conn.PID {
+		fmt.Printf("[SMM2 Commentaires] complete_picture(%d) pid=%d objet=%d appartient a pid=%d — refuse\n", req.Method, conn.PID, objet, d.PID)
+		return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
 	}
-	c := combinaisonsDessin[n]
-	fmt.Printf("[SMM2 Commentaires]   DESSIN -> combinaison %d = (%d,%d)\n", n, c[0], c[1])
-	return c[0], c[1]
+	taille := d.Taille
+	if st, err := os.Stat(blobPath(objet)); err == nil && st.Size() > 0 {
+		taille = uint32(st.Size())
+	}
+	courses.complete(objet, true)
+	n := commentaires.ajouterDessin(d.Niveau, conn.PID, objet, taille, d.X, d.Y, d.SousMonde)
+	fmt.Printf("[SMM2 Commentaires] complete_picture(%d) pid=%d dessin=%d (%d octets) niveau=%d position=(%d,%d) signalement=%q -> %d commentaire(s)\n",
+		req.Method, conn.PID, objet, taille, d.Niveau, d.X, d.Y, signalement, n)
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
 }
 
 // smm2PostCommentStamp : la methode 92, le commentaire TAMPON.

@@ -32,8 +32,6 @@ var smm2EmptyBuilders = map[uint32]func(*nex.StreamOut){
 	76: func(o *nex.StreamOut) { o.U32(0) },                         // search_courses_played_by
 	80: func(o *nex.StreamOut) { o.U32(0); o.Bool(true) },           // search_courses_first_clear
 	81: func(o *nex.StreamOut) { o.U32(0); o.Bool(true) },           // search_courses_best_time
-	85: func(o *nex.StreamOut) { o.U32(0); o.U32(0) },               // get_courses_event: courses[], results[]
-	86: func(o *nex.StreamOut) { o.U32(0) },                         // search_courses_event
 
 	// --- Méthodes NON documentées (SMM2 3.x) qui peuplent le HUB Course World (Hot/Popular/New) :
 	//     structure déduite en parsant les réponses capturées (list<CourseInfo>[+ranks][+bool]).
@@ -112,6 +110,18 @@ func smm2DataStoreHandler() nex.RMCHandler {
 			return smm2GetEndlessModePlayInfo(conn, req)
 		case 153:
 			return smm2GetEventCourseStamp(conn, req)
+		case 85:
+			return smm2GetCoursesEvent(conn, req)
+		case 86:
+			return smm2SearchCoursesEvent(conn, req)
+		case 102:
+			return smm2PostPlayResultEventCourse(conn, req)
+		case 156:
+			return smm2GetEventCourseHistogram(conn, req)
+		case 157:
+			return smm2GetEventCourseGhost(conn, req)
+		case 169:
+			return smm2GetEventCourseFriendGhost(conn, req)
 		case 57:
 			return smm2SearchUsersClearRanking(conn, req)
 		case 59, 152:

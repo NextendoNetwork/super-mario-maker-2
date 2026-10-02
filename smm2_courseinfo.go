@@ -30,6 +30,8 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	nex "github.com/NextendoNetwork/nextendo-nex"
@@ -218,12 +220,26 @@ func ecrireMiniature(out *nex.StreamOut, c *courseMeta, relType uint8) {
 	out.Write(r.Bytes())
 }
 
-// tagOuZero rend l'etiquette n si elle existe. Les etiquettes arrivent en texte a la
-// publication mais voyagent en code numerique dans CourseInfo ; la table de
-// correspondance n'est pas encore etablie, donc on rend zero (« aucune ») plutot
-// qu'un code invente qui afficherait une etiquette fausse.
+// tagOuZero rend l'etiquette n, en code numerique.
+//
+// LES ETIQUETTES N'ETAIENT JAMAIS ENVOYEES : cette fonction rendait zero quoi qu'il y
+// eut dans le catalogue. Or la 69 (UpdateCourseTag) les y range DEJA en codes decimaux
+// (« 3 », « 14 »), si bien qu'un createur qui modifiait ses etiquettes les voyait
+// acceptees puis disparaitre. Chez Nintendo elles s'affichent (mesure du 2026-10-02).
+//
+// Codes : l'enumeration « Course Tag » de la documentation de kinnay, 0 (aucune) a 15
+// (Link). La capture la confirme : « SUPER RACE!!! » porte 3 et 14, Speedrun et Single
+// player. Toute valeur hors de cette plage — ou un texte qui n'est pas un nombre —
+// rend zero : une etiquette fausse a l'ecran serait pire que pas d'etiquette.
 func tagOuZero(tags []string, n int) uint32 {
-	return 0
+	if n >= len(tags) {
+		return 0
+	}
+	v, err := strconv.ParseUint(strings.TrimSpace(tags[n]), 10, 8)
+	if err != nil || v > 15 {
+		return 0
+	}
+	return uint32(v)
 }
 
 // miniatureDe retrouve le fichier rattache d'un type donne pour ce niveau. Ils sont

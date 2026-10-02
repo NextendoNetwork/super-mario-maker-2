@@ -36,6 +36,18 @@ func TestEncode117FormeMesuree(t *testing.T) {
 			},
 		},
 		{
+			// Octet pour octet, le corps de la reponse capturee sur les serveurs de Nintendo le
+			// 2026-10-02 (compte sans historique de versus), apres l'en-tete RMC de 14 octets.
+			nom:    "mesure Nintendo 2026-10-02",
+			classe: false,
+			notes:  [2]note117{{0xFFFFFFFF, false}, {0, true}},
+			veut: []byte{
+				0x00,
+				0x00, 0x05, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0x00,
+				0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+			},
+		},
+		{
 			nom:    "valeurs posees",
 			classe: true,
 			notes:  [2]note117{{1500, true}, {350, true}},
@@ -84,9 +96,11 @@ func TestEncode117NEstPasUneSuiteDUint32(t *testing.T) {
 func TestEncode119(t *testing.T) {
 	s := nex.NewSwitchSettings(accessKey, nexVersion)
 	got := encode119(s)
+	// Memes valeurs que la 117 (elles sont partagees), sans le bool de tete. La seconde
+	// structure suit la mesure Nintendo : { 0, true }.
 	veut := []byte{
 		0x00, 0x05, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0x00,
-		0x00, 0x05, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0x00,
+		0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
 	}
 	if !bytes.Equal(got, veut) {
 		t.Errorf("obtenu %x\nattendu %x", got, veut)
@@ -97,5 +111,21 @@ func TestEncode119(t *testing.T) {
 	// La 117 en fait 21 : si les deux coincident, c'est qu'on a ajoute le bool de tete.
 	if len(got) == len(encode117(s, false, [2]note117{{0xFFFFFFFF, false}, {0xFFFFFFFF, false}})) {
 		t.Error("la 119 ne doit PAS porter le bool de tete de la 117")
+	}
+}
+
+// TestValeursVersusParDefautSontLaMesure fixe le defaut sur la capture Nintendo du
+// 2026-10-02. Il echoue si quelqu'un revient a deux structures invalides — la combinaison
+// qui faisait planter la console a l'arrivee — ou repasse a des valeurs devinees.
+func TestValeursVersusParDefautSontLaMesure(t *testing.T) {
+	classe, notes := valeursVersus()
+	if classe {
+		t.Error("Nintendo renvoie false pour le bool de tete")
+	}
+	if notes[0] != (note117{0xFFFFFFFF, false}) {
+		t.Errorf("premiere structure : attendu {0xFFFFFFFF false}, obtenu %+v", notes[0])
+	}
+	if notes[1] != (note117{0, true}) {
+		t.Errorf("seconde structure : attendu {0 true}, obtenu %+v", notes[1])
 	}
 }

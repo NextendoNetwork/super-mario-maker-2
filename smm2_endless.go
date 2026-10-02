@@ -6,6 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
+
+	nex "github.com/NextendoNetwork/nextendo-nex"
 )
 
 // L'etat des parties de Mario sans fin.
@@ -23,8 +26,42 @@ import (
 //     vies INITIALES — jamais zero, ce qui etait notre erreur
 //
 // Ce dernier point est ce qui bloquait : nous envoyions quatre difficultes a zero vie.
+//
+// MESURE CHEZ NINTENDO le 2026-10-02 (capturas-smm2, HALLAZGOS-SMM2-2026-10-02.txt) :
+//
+//   - NORMAL COMMENCE A 5 VIES, pas 10 : la 108 annonce StartLives=5 et la premiere 110
+//     apres l'initialisation rend 5 vies. Facile = 5, expert = 15, super expert = 30 sont
+//     les valeurs que la 108 annonce ; seule la normale a ete jouee, donc mesuree.
+//   - LES VIES NE SONT PAS PLAFONNEES aux vies initiales : en normale, 5 vies + 3 gagnees
+//     au premier niveau = 8 chez Nintendo. Notre plafond les ramenait a 5.
+//   - la 115 rend, par difficulte, LA LISTE DES NIVEAUX REUSSIS dans la partie en cours.
+//     Nous rendions quatre listes vides : une partie a N reussites et zero niveau, que le
+//     jeu ne reconnait pas au retour. C'est le « Continue » qui n'apparaissait pas.
+//   - les deux DateTime de la 108 sont de vraies dates : debut de partie, puis derniere
+//     suspension. Une partie jamais suspendue garde l'epoque.
 
-var viesInitialesEndless = [4]uint8{5, 10, 15, 30}
+var viesInitialesEndless = [4]uint8{5, 5, 15, 30}
+
+// viesMaxEndless : la seule borne. Le jeu decide lui-meme des vies gagnees ; on se
+// contente de ne pas deborder de ce qu'il sait afficher.
+const viesMaxEndless = 99
+
+// niveauEndless : un niveau reussi dans la partie en cours, tel que la 115 le rend.
+// Inconnu8 et Inconnu9 sont les deux derniers octets de la 111, rendus tels quels — chez
+// Nintendo ils reviennent a l'identique (04 03 envoyes, 04 03 rendus).
+type niveauEndless struct {
+	DataID   uint64 `json:"data_id"`
+	Inconnu8 uint8  `json:"u8"`
+	Inconnu9 uint8  `json:"u9"`
+}
+
+// horloge est remplacable dans les tests, pour rejouer les dates de la capture.
+var horloge = time.Now
+
+func dateTimeMaintenant() uint64 {
+	t := horloge().UTC()
+	return uint64(nex.MakeDateTime(t.Year(), int(t.Month()), t.Day(), t.Hour(), t.Minute(), t.Second()))
+}
 
 type partieEndless struct {
 	Mode        uint8  `json:"mode"` // 2 = partie en cours
@@ -41,6 +78,11 @@ type partieEndless struct {
 	// Reussites, remis a zero a chaque nouvelle tentative — et c'est lui que le profil
 	// affiche comme score du mode sans fin.
 	Record uint32 `json:"record,omitempty"`
+	// Debut et Suspendue : les deux DateTime de la 108. Zero = jamais, on rend l'epoque.
+	Debut     uint64 `json:"debut,omitempty"`
+	Suspendue uint64 `json:"suspendue,omitempty"`
+	// Niveaux : les niveaux reussis dans CETTE partie, dans l'ordre, pour la 115.
+	Niveaux []niveauEndless `json:"niveaux,omitempty"`
 }
 
 type magasinEndless struct {
@@ -102,10 +144,14 @@ func (m *magasinEndless) demarrer(pid uint64, difficulte uint8) {
 		p = &[4]partieEndless{}
 		m.parPID[pid] = p
 	}
+	// Le Record survit a une nouvelle partie, comme il survit a terminer : l'ecraser ici
+	// effacait le meilleur score de la difficulte a chaque tentative.
 	p[difficulte] = partieEndless{
 		Mode:      2, // actif
 		Vies:      viesInitialesEndless[difficulte],
 		Reussites: 0,
+		Record:    p[difficulte].Record,
+		Debut:     dateTimeMaintenant(),
 	}
 	m.ecrireLocked()
 	m.mu.Unlock()
@@ -134,10 +180,10 @@ func (m *magasinEndless) demarrerCours(pid uint64, difficulte uint8, cours uint6
 	return e.Vies, e.Reussites, mort
 }
 
-// reussirCours acte un niveau termine : une reussite de plus, et des vies gagnees dans la
-// limite du maximum de la difficulte. Sans ce plafond, un joueur accumulerait des vies sans
-// fin et le mode cesserait d'etre un mode « sans fin ».
-func (m *magasinEndless) reussirCours(pid uint64, difficulte, viesGagnees, pieces uint8, points uint32) (uint8, uint32) {
+// reussirCours acte un niveau termine : une reussite de plus, les vies gagnees, et le
+// niveau ajoute a la liste de la partie. Il n'y a PAS de plafond aux vies initiales : chez
+// Nintendo, 5 vies + 3 gagnees donnent 8 en normale.
+func (m *magasinEndless) reussirCours(pid uint64, difficulte uint8, cours uint64, viesGagnees, pieces uint8, points uint32, inconnu8, inconnu9 uint8) (uint8, uint32) {
 	if difficulte > 3 {
 		return 0, 0
 	}
@@ -149,9 +195,8 @@ func (m *magasinEndless) reussirCours(pid uint64, difficulte, viesGagnees, piece
 		m.parPID[pid] = p
 	}
 	e := &p[difficulte]
-	max := viesInitialesEndless[difficulte]
-	if int(e.Vies)+int(viesGagnees) > int(max) {
-		e.Vies = max
+	if int(e.Vies)+int(viesGagnees) > viesMaxEndless {
+		e.Vies = viesMaxEndless
 	} else {
 		e.Vies += viesGagnees
 	}
@@ -161,9 +206,25 @@ func (m *magasinEndless) reussirCours(pid uint64, difficulte, viesGagnees, piece
 	}
 	e.Pieces = pieces
 	e.PointsScore = points
+	e.Niveaux = append(e.Niveaux, niveauEndless{DataID: cours, Inconnu8: inconnu8, Inconnu9: inconnu9})
 	e.CoursActuel = 0 // le niveau est fini : le suivant ne sera pas une mort
 	m.ecrireLocked()
 	return e.Vies, e.Reussites
+}
+
+// suspendre date la pause. Rien d'autre ne change : suspendre n'est pas abandonner.
+func (m *magasinEndless) suspendre(pid uint64, difficulte uint8) {
+	if difficulte > 3 {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p, ok := m.parPID[pid]
+	if !ok {
+		return
+	}
+	p[difficulte].Suspendue = dateTimeMaintenant()
+	m.ecrireLocked()
 }
 
 // terminer clot la partie : le mode repasse a zero, mais les reussites sont RENDUES avant

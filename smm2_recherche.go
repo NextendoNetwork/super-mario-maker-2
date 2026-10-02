@@ -345,10 +345,9 @@ func smm2GetBattleModeRating(conn *nex.Connection, req *nex.RMCMessage) *nex.RMC
 	// toutes deux du bloc versus : c'est un type propre au mode, pas un type generique. Elle
 	// ne porte qu'UN uint32, donc ce n'est pas non plus le triplet Glicko-2 qu'on supposait.
 	//
-	// ⚠️ Les VALEURS restent inconnues. Le constructeur par defaut du client pose
-	// uint32 = 0xFFFFFFFF et bool = false, ce qui se lit comme « pas encore classe » ; ce sont
-	// les seules valeurs qu'on ait vu le client se donner lui-meme, donc ce sont celles par
-	// defaut ici. En choisir d'autres sans les mesurer, ce serait retomber dans la devinette.
+	// Les VALEURS sont mesurees chez Nintendo depuis le 2026-10-02 : voir valeursVersus. Le
+	// constructeur par defaut du client pose uint32 = 0xFFFFFFFF et bool = false ; Nintendo
+	// renvoie ca pour la premiere structure, mais { 0, true } pour la seconde.
 	//
 	//	echo "1,1500,1,350,1" > /opt/smm2/smm2_117.valeurs
 	//	       ^   ^    ^     champ0 , puis (valeur,drapeau) pour chacune des deux structures
@@ -578,9 +577,28 @@ func encode119(s *nex.Settings) []byte {
 //
 // ⚠️ 1500 et 350 sont les valeurs d'ouverture usuelles d'un classement Glicko-2, pas une
 // mesure. Elles marchent, ce qui ne veut pas dire qu'elles sont les bonnes.
+//
+// MESURE CHEZ NINTENDO le 2026-10-02, et ce sont desormais les valeurs par defaut. Capture
+// d'une console sur les serveurs officiels, compte sans aucun historique de versus, 117
+// demandee deux fois avant la recherche d'adversaire, reponse identique les deux fois :
+//
+//	00 | 00 05000000 ffffffff 00 | 00 05000000 00000000 01
+//	bool false | { 0xFFFFFFFF, false } | { 0, true }
+//
+// Ca concorde avec la mesure du 09-02 : avec les DEUX structures invalides la console
+// plantait a l'arrivee ; Nintendo laisse bien la premiere invalide, mais la seconde est
+// VALIDE (a zero). C'est la seconde qui manquait.
+//
+// Ce sont les valeurs d'un joueur sans historique. Un joueur classe en aurait d'autres, mais
+// personne n'a d'historique de versus sur Nextendo : c'est le bon point de depart. Le fichier
+// smm2_117.valeurs garde la main s'il existe — et en production il porte encore
+// "1,1500,1,350,1" : il faut le RETIRER pour que ces valeurs-ci s'appliquent.
+//
+// La 119 partage ces valeurs (voir plus haut). Sa reponse chez Nintendo n'est PAS mesuree :
+// la capture n'a trouve aucun adversaire, donc aucune fin de match.
 func valeursVersus() (bool, [2]note117) {
 	classe := false
-	notes := [2]note117{{0xFFFFFFFF, false}, {0xFFFFFFFF, false}}
+	notes := [2]note117{{0xFFFFFFFF, false}, {0, true}}
 
 	b, err := os.ReadFile("/data/smm2_117.valeurs")
 	if err != nil {

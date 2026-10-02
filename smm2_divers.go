@@ -89,21 +89,6 @@ func smm2GetNotifications(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMes
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
 }
 
-// smm2GetEventCourseStatus (154) : l'etat du niveau evenementiel en cours.
-//
-// EventCourseStatusInfo = Uint64, Bool, DateTime. Le repli renvoyait un Uint32 : forme
-// entierement differente. Il n'y a pas d'evenement sur Nextendo, d'ou le faux et les
-// zeros — mais dans la bonne enveloppe.
-func smm2GetEventCourseStatus(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
-	s := conn.Settings
-	corps := nex.NewStreamOut(s)
-	corps.U64(0)
-	corps.Bool(false)
-	corps.U64(0) // DateTime
-	fmt.Printf("[SMM2 Divers] get_event_course_status(154) pid=%d -> aucun evenement\n", conn.PID)
-	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, frameStruct(s, 0, corps.Bytes()))
-}
-
 // smm2GetEndlessModeStatus (108) : la configuration et l'etat des quatre difficultes.
 //
 // Structure prise du serveur d'Open Course World (ocw-server,
@@ -121,10 +106,23 @@ func smm2GetEventCourseStatus(conn *nex.Connection, req *nex.RMCMessage) *nex.RM
 // cles pour proposer les quatre difficultes. Les VALEURS, elles, sont celles d'un joueur
 // qui n'a jamais joue — c'est exact chez nous — sauf StartLives, qui est une regle du
 // jeu et vaut 5, 10, 15, 30 selon la difficulte (releve dans endless_type_normal.go).
+//
+// MESURE CHEZ NINTENDO le 2026-10-02 : la forme ci-dessus est exacte a l'octet pres. Ce
+// qui differait, ce sont les VALEURS : de vraies dates (debut, derniere suspension) et,
+// pour une difficulte deja jouee, les vies STOCKEES — Nintendo rend 0 ou 7, pas les vies
+// initiales. On ne garde la regle d'ocw-server que pour une difficulte jamais jouee
+// (mode 0), ou elle reste necessaire : zero vie partout bloquait l'ecran.
 func smm2GetEndlessModeStatus(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
 	s := conn.Settings
 	etat := endless.etatDe(conn.PID)
 
+	fmt.Printf("[SMM2 Divers] get_endless_mode_status(108) pid=%d -> modes=[%d %d %d %d] vies=[%d %d %d %d]\n",
+		conn.PID, etat[0].Mode, etat[1].Mode, etat[2].Mode, etat[3].Mode,
+		viesOu(etat[0], 0), viesOu(etat[1], 1), viesOu(etat[2], 2), viesOu(etat[3], 3))
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, frameStruct(s, 0, encode108(s, etat)))
+}
+
+func encode108(s *nex.Settings, etat [4]partieEndless) []byte {
 	imbrique := func(o *nex.StreamOut, f func(*nex.StreamOut)) {
 		inner := nex.NewStreamOut(s)
 		f(inner)
@@ -143,13 +141,7 @@ func smm2GetEndlessModeStatus(conn *nex.Connection, req *nex.RMCMessage) *nex.RM
 	for d := uint8(0); d < 4; d++ {
 		corps.U8(d)
 		e := etat[d]
-		// Si aucune partie n'est en cours, les vies valent les vies INITIALES et non
-		// zero. C'est la ligne exacte d'ocw-server, et c'est ce qui nous bloquait : on
-		// annoncait quatre difficultes sans une seule vie.
-		vies := e.Vies
-		if e.Mode != 2 {
-			vies = viesInitialesEndless[d]
-		}
+		vies := viesOu(e, int(d))
 		imbrique(corps, func(o *nex.StreamOut) {
 			o.U8(e.Mode)
 			o.U8(e.Pieces)
@@ -158,8 +150,8 @@ func smm2GetEndlessModeStatus(conn *nex.Connection, req *nex.RMCMessage) *nex.RM
 			// du 1er janvier 1970 EMPAQUETEE — un grand nombre, pas un zero. Un
 			// DateTime NEX est un champ de bits ; zero n'y designe aucune date valide.
 			// C'est la meme confusion qui affichait « 06/10/0026 » sur les niveaux.
-			o.U64(dateTimeEpoque)
-			o.U64(dateTimeEpoque)
+			o.U64(dateTimeOuEpoque(e.Debut))
+			o.U64(dateTimeOuEpoque(e.Suspendue))
 			o.U8(vies)
 			o.U8(viesInitialesEndless[d])
 		})
@@ -170,20 +162,13 @@ func smm2GetEndlessModeStatus(conn *nex.Connection, req *nex.RMCMessage) *nex.RM
 	for d := uint8(0); d < 4; d++ {
 		corps.U8(d)
 		e := etat[d]
-		vies := e.Vies
-		if e.Mode != 2 {
-			vies = viesInitialesEndless[d]
-		}
+		vies := viesOu(e, int(d))
 		imbrique(corps, func(o *nex.StreamOut) {
 			o.U8(vies)
 			o.U32(e.Reussites)
 		})
 	}
-
-	fmt.Printf("[SMM2 Divers] get_endless_mode_status(108) pid=%d -> modes=[%d %d %d %d] vies=[%d %d %d %d]\n",
-		conn.PID, etat[0].Mode, etat[1].Mode, etat[2].Mode, etat[3].Mode,
-		viesOu(etat[0], 0), viesOu(etat[1], 1), viesOu(etat[2], 2), viesOu(etat[3], 3))
-	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, frameStruct(s, 0, corps.Bytes()))
+	return corps.Bytes()
 }
 
 // smm2InitEndlessMode (109) : le joueur demarre une partie.
@@ -292,19 +277,6 @@ func smm2SearchUsersBattleMode(conn *nex.Connection, req *nex.RMCMessage) *nex.R
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
 }
 
-// smm2GetEventCourseStamp (153) : le nombre de tampons d'evenement.
-//
-// Un seul Uint32. Le repli generique renvoyait deja exactement cela — cette methode
-// n'etait donc PAS cassee. On l'ecrit explicitement pour ne pas dependre d'une
-// coincidence, mais il ne faut pas s'attendre a un changement a l'ecran.
-func smm2GetEventCourseStamp(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
-	s := conn.Settings
-	out := nex.NewStreamOut(s)
-	out.U32(0)
-	fmt.Printf("[SMM2 Divers] get_event_course_stamp(153) pid=%d -> 0\n", conn.PID)
-	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
-}
-
 // smm2GetEndlessModePlayInfo (115) : l'etat des parties de Mario sans fin.
 //
 // STRUCTURE EXACTE, plus une supposition. Elle vient du serveur d'Open Course World —
@@ -326,33 +298,65 @@ func smm2GetEventCourseStamp(conn *nex.Connection, req *nex.RMCMessage) *nex.RMC
 // n'etait donc pas la 109 : c'etait la 115, un appel plus tot, mal formee d'une facon
 // que rien ne signalait.
 //
-// Les quatre listes sont vides et c'est exact : personne n'a de partie en cours chez
-// nous. Ce sont les CLES qui manquaient, pas les valeurs.
+// LES LISTES NE SONT PAS VIDES. Mesure chez Nintendo le 2026-10-02 : chaque liste porte
+// les niveaux REUSSIS dans la partie en cours — dix en facile pour Reussites=10, un en
+// normale apres un premier niveau. Chaque element est encadre (version 0, 15 octets) :
+//
+//	Uint64 data_id · Uint8 0 · Uint32 rang (1, 2, ...) · Uint8 · Uint8
+//
+// les deux derniers etant ceux que le jeu envoie en fin de 111. Des listes toujours vides
+// donnaient une partie a N reussites sans un seul niveau : le jeu ne proposait pas de
+// la reprendre.
 func smm2GetEndlessModePlayInfo(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
 	s := conn.Settings
+	e := endless.etatDe(conn.PID)
+	fmt.Printf("[SMM2 Divers] get_endless_mode_play_info(115) pid=%d -> modes=[%d %d %d %d] niveaux=[%d %d %d %d]\n",
+		conn.PID, e[0].Mode, e[1].Mode, e[2].Mode, e[3].Mode,
+		len(e[0].Niveaux), len(e[1].Niveaux), len(e[2].Niveaux), len(e[3].Niveaux))
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, frameStruct(s, 0, encode115(s, e)))
+}
 
+func encode115(s *nex.Settings, etat [4]partieEndless) []byte {
 	corps := nex.NewStreamOut(s)
 	corps.U32(4) // quatre difficultes
 	for cle := uint8(0); cle < 4; cle++ {
 		corps.U8(cle)
-		corps.U32(0) // aucune partie en cours a cette difficulte
+		// Seule une partie EN COURS a des niveaux a reprendre.
+		var niveaux []niveauEndless
+		if etat[cle].Mode == 2 {
+			niveaux = etat[cle].Niveaux
+		}
+		corps.U32(uint32(len(niveaux)))
+		for i, n := range niveaux {
+			el := nex.NewStreamOut(s)
+			el.U64(n.DataID)
+			el.U8(0)
+			el.U32(uint32(i + 1))
+			el.U8(n.Inconnu8)
+			el.U8(n.Inconnu9)
+			corps.Write(frameStruct(s, 0, el.Bytes()))
+		}
 	}
-
-	e := endless.etatDe(conn.PID)
-	fmt.Printf("[SMM2 Divers] get_endless_mode_play_info(115) pid=%d -> 4 difficultes, modes=[%d %d %d %d]\n",
-		conn.PID, e[0].Mode, e[1].Mode, e[2].Mode, e[3].Mode)
-	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, frameStruct(s, 0, corps.Bytes()))
+	return corps.Bytes()
 }
 
 // dateTimeEpoque : le 1er janvier 1970 au format DateTime de NEX. ocw-server emploie
 // cette valeur la ou nous mettions zero.
 var dateTimeEpoque = uint64(nex.MakeDateTime(1970, 1, 1, 0, 0, 0))
 
-// viesOu rend les vies a afficher : celles de la partie si elle est active, sinon les
-// vies initiales de la difficulte.
+// viesOu rend les vies a afficher : celles qui sont stockees, sauf pour une difficulte
+// jamais jouee (mode 0), qui annonce ses vies initiales.
 func viesOu(e partieEndless, difficulte int) uint8 {
-	if e.Mode == 2 {
+	if e.Mode != 0 {
 		return e.Vies
 	}
 	return viesInitialesEndless[difficulte]
+}
+
+// dateTimeOuEpoque : une date stockee, ou l'epoque si elle ne l'a jamais ete.
+func dateTimeOuEpoque(v uint64) uint64 {
+	if v == 0 {
+		return dateTimeEpoque
+	}
+	return v
 }

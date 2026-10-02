@@ -86,7 +86,7 @@ func smm2DominateEndlessModeCourse(conn *nex.Connection, req *nex.RMCMessage) *n
 		return nex.NewRMCError(s, 0x73, req.CallID, 0x00690002)
 	}
 
-	vies, reussites := endless.reussirCours(conn.PID, difficulte, viesGagnees, pieces, points)
+	vies, reussites := endless.reussirCours(conn.PID, difficulte, cours, viesGagnees, pieces, points, unk8, unk9)
 	out := nex.NewStreamOut(s)
 	ecrireEtatManche(out, vies, reussites)
 
@@ -110,13 +110,14 @@ func smm2PassEndlessModeCourse(conn *nex.Connection, req *nex.RMCMessage) *nex.R
 // 113 SuspendEndlessModeCourse : la partie est mise en pause. Aucune reponse.
 //
 // On NE remet PAS la partie a zero ici : suspendre n'est pas abandonner, et le joueur doit
-// retrouver ses vies en revenant.
+// retrouver ses vies en revenant. On DATE la pause : c'est le second DateTime de la 108.
 func smm2SuspendEndlessModeCourse(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
 	s := conn.Settings
 	in := nex.NewStreamIn(req.Body, s)
 	_ = in.U8()
 	p := in.Substream()
 	difficulte := p.U8()
+	endless.suspendre(conn.PID, difficulte)
 	fmt.Printf("[SMM2 Endless] suspend(113) pid=%d difficulte=%d\n", conn.PID, difficulte)
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
 }

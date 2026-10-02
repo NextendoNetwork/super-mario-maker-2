@@ -106,6 +106,12 @@ func smm2PrepareRelationUpload(conn *nex.Connection, req *nex.RMCMessage) *nex.R
 	relType := sub.U32()
 	reqSize := sub.U32() // the byte-size of the asset the console will upload
 
+	// Un FANTOME de Ninji (type 13) n'a pas de descripteur capture, et le repli « n'importe
+	// quelle 132 mesuree » l'enverrait vers la clef d'un autre fichier. Il prend le chemin
+	// dynamique : la clef rendue est notre objet, et la 102 la rapporte telle quelle.
+	if relType == typeRelationFantome {
+		return smm2PrepareRelationUploadDynamique(conn, req)
+	}
 	tmpl := m132ByType[relType]
 	if tmpl == nil {
 		tmpl = capturedResponses[replayKey(0x73, 132)] // fallback: any measured 132
@@ -285,8 +291,12 @@ func smm2PreparePostObjectCourse(conn *nex.Connection, req *nex.RMCMessage) *nex
 	desc := p.String() // seconde : la description
 	taille := p.U32()  // taille annoncee du fichier
 	_ = p.Bool()
-	_ = p.U8()
-	_ = p.U8()
+	// Deux Uint8 que la documentation laisse « Unknown ». Ce sont les candidats les plus
+	// probables pour les deux etiquettes choisies a la publication, mais RIEN ne l'a
+	// encore mesure : on les journalise avec la liste de chaines, sans les utiliser. Une
+	// publication avec deux etiquettes connues tranchera.
+	u8a := p.U8()
+	u8b := p.U8()
 	for i := 0; i < 4; i++ {
 		_ = p.U32()
 	}
@@ -308,6 +318,8 @@ func smm2PreparePostObjectCourse(conn *nex.Connection, req *nex.RMCMessage) *nex
 		return nex.NewRMCError(s, 0x73, req.CallID, 0x00690002) // DataStore::InvalidArgument
 	}
 
+	fmt.Printf("[SMM2 Storage] prepare_post_course(66) pid=%d etiquettes : liste=%q u8=[%d %d]\n",
+		conn.PID, etiquettes, u8a, u8b)
 	id := courses.alloc(conn.PID, nom, 0, meta, etiquettes, taille)
 	courses.mu.Lock()
 	if m := courses.byID[id]; m != nil {

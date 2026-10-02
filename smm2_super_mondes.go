@@ -406,7 +406,9 @@ func smm2GetWorldMap(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage 
 	out.U32(uint32(len(trouves)))
 	for _, sm := range trouves {
 		if sm != nil {
-			out.Result(0)
+			// 0x00690001 et non 0 : c'est le code que Nintendo rend pour une fiche trouvee
+			// (mesure du 2026-10-02, capturas-smm2 c542).
+			out.Result(0x00690001)
 		} else {
 			out.Result(0x00690004) // DataStore::NotFound
 		}
@@ -528,16 +530,33 @@ func smm2GetWorldMapProgress(conn *nex.Connection, req *nex.RMCMessage) *nex.RMC
 	}
 
 	superMondes.mu.RLock()
-	pr := superMondes.progres[cleProgres(conn.PID, id)]
+	stocke := superMondes.progres[cleProgres(conn.PID, id)]
 	superMondes.mu.RUnlock()
-	// Pas encore commence : une progression VIDE, pas une erreur. Le joueur qui ouvre un
-	// monde pour la premiere fois est le cas normal, pas une panne.
-	if pr == nil {
-		pr = &progressionMonde{}
+
+	// MESURE CHEZ NINTENDO le 2026-10-02 (capturas-smm2 c543, c554, c564, c566) :
+	//
+	//   - pas encore commence : l'identifiant revient VIDE, suivi de zeros. Nous rendions
+	//     l'identifiant demande, c'est-a-dire une progression qui semblait exister.
+	//   - apres une 166 : Nintendo rend EXACTEMENT ce que la console a envoye, sauf le
+	//     premier octet (Unk20), envoye a 1 et rendu a 2. C'est ce qui fait apparaitre
+	//     « Continuer » au retour dans le monde ; nous rendions le 1.
+	//
+	// Une progression venue d'une 166 se reconnait a son niveau courant, que la 165
+	// laisse a zero : les progressions deja enregistrees en production en profitent sans
+	// migration.
+	pr := &progressionMonde{}
+	idRendu := ""
+	if stocke != nil {
+		copie := *stocke
+		pr = &copie
+		idRendu = id
+		if pr.CourseID != 0 && pr.Unk20 == 1 {
+			pr.Unk20 = 2
+		}
 	}
 
 	out := nex.NewStreamOut(s)
-	ecrireWorldMapProgressInfo(out, id, pr)
+	ecrireWorldMapProgressInfo(out, idRendu, pr)
 	fmt.Printf("[SMM2 SuperMondes] progress(163) pid=%d id=%s -> niveau=%d vies=%d pieces=%d points=%d\n",
 		conn.PID, id, pr.CourseID, pr.Vies, pr.Pieces, pr.Points)
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
