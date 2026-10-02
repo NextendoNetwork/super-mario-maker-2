@@ -261,6 +261,16 @@ func smm2PostPlayResult(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessa
 	}
 	r := resultats.lire(dataID)
 
+	// La marque de mort de l'essai : une structure de 13 octets apres le temps, nulle
+	// quand le niveau est reussi (mesure, voir smm2_notes.go).
+	if !termine {
+		if idMort, m, ok := lireMarqueMort(s, req.Body); ok && idMort == dataID {
+			notes.mourir(dataID, m.X, m.Y, m.SousZone)
+			fmt.Printf("[SMM2 Resultats] post_play_result(96) pid=%d data_id=%d mort en (%d,%d) zone %d\n",
+				conn.PID, dataID, m.X, m.Y, m.SousZone)
+		}
+	}
+
 	// LE CORPS BRUT, pour retrouver la marque de mort. Quand un joueur echoue, le jeu
 	// affiche une croix a l'endroit exact ou il est tombe, et cette croix est censee etre
 	// conservee. Aucune methode non traitee ne porte de coordonnees pendant une partie —

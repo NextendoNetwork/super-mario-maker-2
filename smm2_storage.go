@@ -332,6 +332,7 @@ func startStorageServer() {
 	endless.charger(storageDir)
 	superMondes.charger(storageDir)
 	ninji.charger(storageDir)
+	notes.charger(storageDir)
 	// Une seule passe au demarrage pour etablir premieres reussites et records, et pour
 	// rattraper les fichiers ecrits avant que ces compteurs existent.
 	resultats.reconstruireCompteurs()

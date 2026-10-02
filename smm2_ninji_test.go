@@ -33,15 +33,15 @@ func lireFiche(t *testing.T, in *nex.StreamIn) (dataID uint64, pb uint32, fantom
 	l := lecteurNinji{t, in}
 	v := l.struct_("EventCourseInfo", func(p *nex.StreamIn) {
 		dataID = p.U64()
-		p.String()
-		p.String()
+		_ = p.String()
+		_ = p.String()
 		p.U8()
 		p.U8()
 		p.Bool()
 		p.Bool()
 		p.DateTime()
 		lecteurNinji{t, p}.struct_("DataStoreReqGetInfo", func(q *nex.StreamIn) {
-			q.String()
+			_ = q.String()
 			nex.ReadList(q, func(i *nex.StreamIn) [2]string { return [2]string{i.String(), i.String()} })
 			q.U32()
 			q.Buffer()
@@ -55,11 +55,11 @@ func lireFiche(t *testing.T, in *nex.StreamIn) (dataID uint64, pb uint32, fantom
 		p.U8()
 		for _, nom := range []string{"vignette 0x10", "vignette 0x20"} {
 			lecteurNinji{t, p}.struct_(nom, func(q *nex.StreamIn) {
-				q.String()
+				_ = q.String()
 				nex.ReadList(q, func(i *nex.StreamIn) [2]string { return [2]string{i.String(), i.String()} })
 				q.U32()
 				q.Buffer()
-				q.String()
+				_ = q.String()
 			})
 		}
 		p.DateTime()
@@ -75,7 +75,7 @@ func lireFiche(t *testing.T, in *nex.StreamIn) (dataID uint64, pb uint32, fantom
 			q.U8()
 			q.U32()
 			q.Buffer()
-			q.String()
+			_ = q.String()
 		})
 	})
 	if v != 1 {
@@ -204,12 +204,12 @@ func TestNinjiRejoueLesRequetesDeNintendo(t *testing.T) {
 	}
 	lecteurNinji{t, in}.struct_("EventCourseGhostInfo", func(p *nex.StreamIn) {
 		lecteurNinji{t, p}.struct_("RelationObjectReqGetInfo", func(q *nex.StreamIn) {
-			q.String()
+			_ = q.String()
 			if q.U8() != 40 || q.U32() != 3187 {
 				t.Fatal("157 : type ou taille du fantome")
 			}
 			q.Buffer()
-			q.String()
+			_ = q.String()
 		})
 		if p.U32() != 56359 || p.PID() != 1 {
 			t.Fatal("157 : temps ou joueur")

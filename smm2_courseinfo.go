@@ -123,7 +123,18 @@ func ecrireCourseInfo(out *nex.StreamOut, c *courseMeta, options uint32) {
 			func(o *nex.StreamOut, k uint8) { o.U8(k) },
 			func(o *nex.StreamOut, v uint32) { o.U32(v) })
 	}
-	vide() // Ratings
+	{
+		// Les notes : 0 coeurs, 1 bouh, 2 joue sans noter (voir smm2_notes.go). Vide, le
+		// jeu n'affichait aucun coeur meme apres un J'aime.
+		aime, bouh, sans := notes.compte(c.DataID)
+		f.U32(3)
+		f.U8(0)
+		f.U32(aime)
+		f.U8(1)
+		f.U32(bouh)
+		f.U8(2)
+		f.U32(sans)
+	}
 	vide() // Unk4
 	{
 		// CourseTimeStats : PID, PID, Uint32, Uint32 — pas trois Uint32 comme je l'avais
@@ -488,6 +499,14 @@ func smm2CanPostRatingAndComment(conn *nex.Connection, req *nex.RMCMessage) *nex
 		dataID = in.U64()
 	}
 
+	// LA REPONSE MESUREE CHEZ NINTENDO (2026-10-02), par defaut : voir encode61 dans
+	// smm2_notes.go. Les variantes ci-dessous ne servent plus que si smm2_61.forme existe.
+	if formeEssai(61, -1) < 0 {
+		fmt.Printf("[SMM2 Courses] can_post_rating_and_comment(61) pid=%d data_id=%d -> mesure Nintendo, %d note(s) restante(s)\n",
+			conn.PID, dataID, notes.restantes(conn.PID))
+		return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, encode61(s, dataID, conn.PID))
+	}
+
 	// LES DEUX Uint32 SONT UNE INCONNUE, ET LEUR VALEUR COMPTE.
 	//
 	// La structure documentee est Bool, Uint32, Map — deux fois, l'une pour la note et
@@ -548,27 +567,4 @@ func smm2CanPostRatingAndComment(conn *nex.Connection, req *nex.RMCMessage) *nex
 	fmt.Printf("[SMM2 Courses] can_post_rating_and_comment(61) data_id=%d -> variante %d : restreint=%v quota=%d\n",
 		dataID, variante, restreint, quota)
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, frameStruct(s, 0, corps.Bytes()))
-}
-
-// smm2GetDeathPositions (103) : ou les joueurs sont morts dans un niveau.
-//
-// Requete : Uint64 (data_id).  Reponse : List<DeathPositionInfo>.
-func smm2GetDeathPositions(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
-	s := conn.Settings
-
-	in := nex.NewStreamIn(req.Body, s)
-	var dataID uint64
-	if s.StructHeader {
-		_ = in.U8()
-		p := in.Substream()
-		dataID = p.U64()
-	} else {
-		dataID = in.U64()
-	}
-
-	out := nex.NewStreamOut(s)
-	out.U32(0) // aucune mort enregistree
-
-	fmt.Printf("[SMM2 Courses] get_death_positions(103) data_id=%d -> 0\n", dataID)
-	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
 }

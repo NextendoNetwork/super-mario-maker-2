@@ -134,23 +134,3 @@ func smm2FinishEndlessModeCourse(conn *nex.Connection, req *nex.RMCMessage) *nex
 		conn.PID, difficulte, reussites, vies)
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
 }
-
-// 104 PostRankingInfo : le jeu declare un resultat de classement pour un niveau.
-//
-// Onze octets : le data_id du niveau puis trois Uint8 dont le sens n'est pas documente. On
-// les journalise sans les interpreter — les inventer serait pire que de les ignorer — et on
-// repond un corps VIDE, qui est ce que la methode rend.
-func smm2PostRankingInfo(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
-	s := conn.Settings
-	in := nex.NewStreamIn(req.Body, s)
-	_ = in.U8()
-	p := in.Substream()
-	cours := p.U64()
-	a, b, c := p.U8(), p.U8(), p.U8()
-	if err := p.Err(); err != nil {
-		fmt.Printf("[SMM2 Courses] post_ranking_info(104) : parametre illisible (%v) brut=%x\n", err, req.Body)
-		return nex.NewRMCError(s, 0x73, req.CallID, 0x00690002)
-	}
-	fmt.Printf("[SMM2 Courses] post_ranking_info(104) pid=%d niveau=%d unk=[%d %d %d]\n", conn.PID, cours, a, b, c)
-	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
-}

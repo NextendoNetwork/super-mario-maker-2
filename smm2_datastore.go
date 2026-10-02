@@ -304,7 +304,7 @@ func smm2DataStoreHandler() nex.RMCHandler {
 			// PostRankingInfo : le jeu annonce un resultat de classement. La forme du
 			// parametre — CourseId puis trois Uint8 — correspond aux onze octets mesures.
 			// Elle ne rend AUCUN corps ; nous repondions quatre octets a zero.
-			return smm2PostRankingInfo(conn, req)
+			return smm2PostRatingInfo(conn, req)
 		case 110:
 			// StartEndlessModeCourse : le joueur lance un niveau de la reserve.
 			return smm2StartEndlessModeCourse(conn, req)
