@@ -146,8 +146,25 @@ func smm2SearchCoursesRanking(conn *nex.Connection, req *nex.RMCMessage) *nex.RM
 // (84) SearchCoursesPickUp — « A la une ». Liste seule, sans rangs ni booleen final.
 func smm2SearchCoursesPickUp(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
 	s := conn.Settings
-	options, depart, nombre := parametreRecherche(s, req.Body)
-	liste := trancher(niveauxPublics(), depart, nombre)
+	// PARAMETRE MESURE CHEZ NINTENDO (2026-10-02 et 2026-10-05, identique les deux fois) :
+	//
+	//	00 09000000  ff010000  64000000  04
+	//	             options   nombre    Uint8
+	//
+	// Pas de ResultRange : un nombre nu, comme la 78 et la 79. Nous le lisions comme un
+	// ResultRange, le nombre sortait faux et on rendait TOUT le catalogue — 1043 niveaux,
+	// pres de 700 Ko, quand Nintendo en rend 100 (80 Ko). Cela passait de justesse ;
+	// ajouter 48 octets par fiche a fait deborder la reponse (« A communication error »).
+	in := nex.NewStreamIn(req.Body, s)
+	_ = in.U8()
+	p := in.Substream()
+	options := p.U32()
+	nombre := p.U32()
+	inconnu := p.U8()
+	if p.Err() != nil || nombre == 0 || nombre > 100 {
+		nombre = 100
+	}
+	liste := trancher(niveauxPublics(), 0, nombre)
 	if os.Getenv("SMM2_COURSEINFO") != "1" {
 		liste = nil
 	}
@@ -156,8 +173,8 @@ func smm2SearchCoursesPickUp(conn *nex.Connection, req *nex.RMCMessage) *nex.RMC
 	for _, m := range liste {
 		ecrireCourseInfo(out, m, options)
 	}
-	fmt.Printf("[SMM2 Courses] search_courses_pickup(84) pid=%d options=0x%x -> %d niveau(x)\n",
-		conn.PID, options, len(liste))
+	fmt.Printf("[SMM2 Courses] search_courses_pickup(84) pid=%d options=0x%x nombre=%d u8=%d -> %d niveau(x)\n",
+		conn.PID, options, nombre, inconnu, len(liste))
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
 }
 

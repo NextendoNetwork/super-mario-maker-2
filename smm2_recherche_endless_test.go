@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"encoding/hex"
+	"testing"
+
+	nex "github.com/NextendoNetwork/nextendo-nex"
+)
 
 func TestNiveauxEndlessFiltreAvantDeLimiter(t *testing.T) {
 	m := melangerEndless
@@ -48,5 +53,25 @@ func TestNiveauxEndlessAleatoire(t *testing.T) {
 	}
 	if len(premiers) < 5 {
 		t.Fatalf("seulement %d premiers niveaux differents en 30 parties : pas aleatoire", len(premiers))
+	}
+}
+
+// TestPickUpRespecteLeNombre : la 84 recoit {options, nombre, Uint8} — parametre mesure
+// chez Nintendo, 0x1ff, 100, 4 — et ne rend jamais plus que le nombre demande. Nous
+// lisions un ResultRange et rendions tout le catalogue (1043 niveaux, ~700 Ko).
+func TestPickUpRespecteLeNombre(t *testing.T) {
+	ancien := courses
+	defer func() { courses = ancien }()
+	courses = &courseStore{byID: map[uint64]*courseMeta{}}
+	for i := uint64(0); i < 150; i++ {
+		courses.byID[1000+i] = &courseMeta{DataID: 1000 + i, Name: "n", Ready: true}
+	}
+	t.Setenv("SMM2_COURSEINFO", "1")
+	s := nex.NewSwitchSettings(accessKey, nexVersion)
+	corps, _ := hex.DecodeString("0009000000ff0100006400000004")
+	r := smm2SearchCoursesPickUp(&nex.Connection{Settings: s, PID: 1},
+		&nex.RMCMessage{Settings: s, Mode: nex.RMCRequest, Protocol: 0x73, Method: 84, CallID: 1, Body: corps})
+	if n := nex.NewStreamIn(r.Body, s).U32(); n != 100 {
+		t.Fatalf("84 : %d niveaux, attendu 100", n)
 	}
 }
