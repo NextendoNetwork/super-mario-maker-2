@@ -222,19 +222,6 @@ func smm2InitEndlessMode(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMess
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
 }
 
-// smm2SearchCoursesFolloweePostedBy (82) : les niveaux des createurs suivis.
-//
-// Reponse : List<CourseInfo>, Bool. Nextendo n'a pas encore de systeme d'abonnements,
-// donc personne ne suit personne : liste vide.
-func smm2SearchCoursesFolloweePostedBy(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
-	s := conn.Settings
-	out := nex.NewStreamOut(s)
-	listeVide(out)
-	out.Bool(false)
-	fmt.Printf("[SMM2 Divers] search_courses_followee(82) pid=%d -> 0\n", conn.PID)
-	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
-}
-
 // smm2UpdateCourseTag (69) : le createur change les etiquettes de son niveau.
 //
 // Requete : Uint64 dataId, Uint8 tagId1, Uint8 tagId2. Pas de reponse.
