@@ -130,6 +130,10 @@ func main() {
 	// c'est bien la voie de jonction.
 	mm.FindByParticipantEnabled = drapeauFichier("/data/smm2_mm.on", true)
 	mm.FindByParticipantIDResolver = pidJoueur
+	// Nintendo sends the host's Participate notification after CreateSession's
+	// response (measured about 60 ms later). The immediate push arrives before
+	// SMM2 has installed the new room locally and leaves the host invisible.
+	mm.CreateSessionNotificationDelay = 100 * time.Millisecond
 	// Et surtout : une liste de PID vide veut dire « toutes les sessions ouvertes ».
 	// C'est ce que SMM2 envoie en cooperatif (mesure : `findByParticipant(pids=[])`), et
 	// sans cela le drapeau ci-dessus ne sert a rien — l'ancien code bouclait sur une
