@@ -421,25 +421,7 @@ const dureeChoix = 10 * time.Minute
 // niveauxChoisisPourPartie rend les niveaux a jouer, identiques pour tous les joueurs
 // d'une meme partie.
 func niveauxChoisisPourPartie(pid uint64, combien uint32) []*courseMeta {
-	return tirerNiveauxPourPartie(pid, combien, niveauxPublics())
-}
-
-// Les fiches des niveaux sans partie terminee n'ont pas les statistiques que
-// CourseInfo renvoie pour les niveaux joues. La partie du 2026-10-05 a tire un
-// niveau de cette categorie et les deux consoles se sont figees a la meta.
-// Ce filtre permet de tester cette piste sans changer la selection du cooperatif.
-func niveauxChoisisPourVersus(pid uint64, combien uint32) []*courseMeta {
-	var candidats []*courseMeta
-	for _, m := range niveauxPublics() {
-		r := resultats.lire(m.DataID)
-		if r.Parties > 0 && r.Tentatives > 0 && r.Reussites > 0 {
-			candidats = append(candidats, m)
-		}
-	}
-	return tirerNiveauxPourPartie(pid, combien, candidats)
-}
-
-func tirerNiveauxPourPartie(pid uint64, combien uint32, tous []*courseMeta) []*courseMeta {
+	tous := niveauxPublics()
 	if len(tous) == 0 {
 		return nil
 	}
@@ -723,7 +705,7 @@ func smm2SearchCoursesBattleMode(conn *nex.Connection, req *nex.RMCMessage) *nex
 		return nex.NewRMCError(s, 0x73, req.CallID, 0x00690002)
 	}
 
-	liste := niveauxChoisisPourVersus(conn.PID, nombre)
+	liste := niveauxChoisisPourPartie(conn.PID, nombre)
 
 	out := nex.NewStreamOut(s)
 	out.U32(uint32(len(liste)))
