@@ -62,15 +62,40 @@ func smm2GetUserNameNgType(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMe
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
 }
 
-// smm2GetMiiClothes (63) : les tenues de Mii disponibles.
+// smm2GetMiiClothes (63) : les tenues de Mii que le joueur POSSEDE.
 //
-// Liste vide. Nextendo ne distribue pas de catalogue de vetements, et en inventer un
-// ferait apparaitre dans le jeu des tenues qui n'existent nulle part.
+// Chez Nintendo, c'est le SERVEUR qui tient cette liste : la console ne declare jamais
+// ce qu'elle gagne (aucune 62 dans les captures du 2026-10-02 et du 2026-10-05, alors
+// que la liste du joueur est passee de 29 a 30 tenues entre deux sessions). Chaque
+// element est { Uint16 categorie, Uint16 numero, Bool } ; les categories mesurees vont
+// de 0 a 3, les numeros jusqu'a 64.
+//
+// Nous rendions une liste VIDE : le jeu concluait que le joueur n'avait rien et lui
+// redonnait la casquette Ninji a chaque evenement termine. On ne sait pas quand chaque
+// tenue se gagne. Decision de la communaute (sondage Discord du 2026-10-05, 9 voix
+// contre 0) : TOUT debloquer, pour tous. Plages par categorie assez larges pour couvrir
+// tout ce que la mesure a montre (0 : 45, 1 : 100, 2 : 50, 3 : 50) ; le booleen, que
+// Nintendo met a 1 sur les tenues recentes (« nouvelle »), reste faux.
+var tenuesParCategorie = [4]uint16{45, 100, 50, 50}
+
 func smm2GetMiiClothes(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
 	s := conn.Settings
 	out := nex.NewStreamOut(s)
-	listeVide(out)
-	fmt.Printf("[SMM2 Divers] get_mii_clothes(63) pid=%d -> 0\n", conn.PID)
+	total := 0
+	for _, n := range tenuesParCategorie {
+		total += int(n)
+	}
+	out.U32(uint32(total))
+	for cat, n := range tenuesParCategorie {
+		for i := uint16(0); i < n; i++ {
+			e := nex.NewStreamOut(s)
+			e.U16(uint16(cat))
+			e.U16(i)
+			e.Bool(false)
+			out.Write(frameStruct(s, 0, e.Bytes()))
+		}
+	}
+	fmt.Printf("[SMM2 Divers] get_mii_clothes(63) pid=%d -> %d tenue(s), toutes debloquees\n", conn.PID, total)
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
 }
 

@@ -55,3 +55,35 @@ func TestJoueursDuNiveau(t *testing.T) {
 		t.Fatalf("53 avec nombre 2 : %d joueur(s)", n)
 	}
 }
+
+// TestTenuesToutesDebloquees : la 63 rend une List<MiiClothes> qui couvre au moins toutes
+// les tenues vues chez Nintendo (categories 0 a 3, numeros jusqu'a 64), dans la forme
+// mesuree : chaque element encadre { Uint16, Uint16, Bool }, cinq octets.
+func TestTenuesToutesDebloquees(t *testing.T) {
+	s := nex.NewSwitchSettings(accessKey, nexVersion)
+	rep := smm2GetMiiClothes(&nex.Connection{Settings: s, PID: 1},
+		&nex.RMCMessage{Settings: s, Mode: nex.RMCRequest, Protocol: 0x73, Method: 63, CallID: 1})
+	in := nex.NewStreamIn(rep.Body, s)
+	n := in.U32()
+	vues := map[[2]uint16]bool{}
+	for i := uint32(0); i < n; i++ {
+		_ = in.U8()
+		e := in.Substream()
+		cat, num := e.U16(), e.U16()
+		_ = e.Bool()
+		if e.Remaining() != 0 {
+			t.Fatalf("element %d : %d octet(s) de reste", i, e.Remaining())
+		}
+		vues[[2]uint16{cat, num}] = true
+	}
+	// Quelques tenues de la liste mesuree chez Nintendo, dont la plus haute de chaque
+	// categorie.
+	for _, x := range [][2]uint16{{0, 37}, {1, 64}, {2, 10}, {3, 39}, {0, 0}} {
+		if !vues[x] {
+			t.Fatalf("tenue %v absente", x)
+		}
+	}
+	if in.Remaining() != 0 || in.Err() != nil {
+		t.Fatal("reponse mal formee")
+	}
+}
