@@ -574,6 +574,13 @@ func smm2PostPlayResultEventCourse(conn *nex.Connection, req *nex.RMCMessage) *n
 	temps := p.U32()
 	_ = in.U8()
 	clef := in.Substream().String()
+	// Un essai RATE arrive avec le temps 0xFFFFFFFF (mesure en production le 2026-10-05,
+	// joueur qui n'a pas fini le niveau). Ce n'est pas un temps : l'enregistrer en faisait
+	// le « meilleur temps » du joueur, et un seuil de medaille absurde.
+	if temps == 0xFFFFFFFF {
+		fmt.Printf("[SMM2 Ninji] post_result_event(102) pid=%d evenement=%d : essai rate, rien a enregistrer\n", conn.PID, dataID)
+		return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
+	}
 	if err := in.Err(); err != nil || p.Err() != nil || temps == 0 {
 		fmt.Printf("[SMM2 Ninji] post_result_event(102) pid=%d : parametre illisible (%v) brut=%x\n", conn.PID, err, req.Body)
 		return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)

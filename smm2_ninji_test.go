@@ -227,6 +227,18 @@ func TestNinjiRejoueLesRequetesDeNintendo(t *testing.T) {
 		}
 	})
 
+	// Un essai RATE (temps 0xFFFFFFFF, mesure en production) n'est pas enregistre.
+	rate := append(vec("012e00000077297e010000000002000000ffffffff01000d00000077297e010000000090037000000100000500000001010000"), 1)
+	b2 := nex.NewStreamOut(s)
+	b2.Buffer(s2.Bytes())
+	rate = append(rate, b2.Bytes()...)
+	ninji.resultats = map[uint64]map[uint64]*resultatNinji{}
+	smm2PostPlayResultEventCourse(&nex.Connection{Settings: s, PID: 9}, appel(102, rate))
+	if r := ninji.resultat(evt, 9); r != nil {
+		t.Fatalf("essai rate enregistre : %+v", r)
+	}
+	ninji.enregistrer(evt, 1, 56359, fantome, 3187)
+
 	// Un temps moins bon ne remplace pas le meilleur.
 	if ninji.enregistrer(evt, 1, 60000, 0, 0) || ninji.resultat(evt, 1).TempsMs != 56359 {
 		t.Fatal("un temps moins bon a remplace le meilleur")
