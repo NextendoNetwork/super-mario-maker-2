@@ -129,6 +129,7 @@ func main() {
 	// session ? » et la liste vide etait la bonne reponse ; s'il demande d'autres PID,
 	// c'est bien la voie de jonction.
 	mm.FindByParticipantEnabled = drapeauFichier("/data/smm2_mm.on", true)
+	mm.FindByParticipantIDResolver = pidJoueur
 	// Et surtout : une liste de PID vide veut dire « toutes les sessions ouvertes ».
 	// C'est ce que SMM2 envoie en cooperatif (mesure : `findByParticipant(pids=[])`), et
 	// sans cela le drapeau ci-dessus ne sert a rien — l'ancien code bouclait sur une
