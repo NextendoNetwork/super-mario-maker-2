@@ -35,18 +35,18 @@ func TestClassementsDeJoueurs(t *testing.T) {
 		}
 		return o
 	}
-	l, rangs := classer(func(pid uint64) uint32 { return resultats.statsDe(pid).Reussites }, 0, 10)
+	l, rangs, _ := classer(func(pid uint64) uint32 { return resultats.statsDe(pid).Reussites }, 0, 10)
 	if got := pids(l); len(got) != 3 || got[0] != 2 || got[1] != 1 || got[2] != 3 {
 		t.Fatalf("57 : ordre %v, attendu [2 1 3] (4 sans score, 5 sans profil)", got)
 	}
 	if rangs[0] != 1 || rangs[1] != 2 || rangs[2] != 2 {
 		t.Fatalf("57 : rangs %v, attendu [1 2 2]", rangs)
 	}
-	if l, _ := classer(func(pid uint64) uint32 { return resultats.statsDe(pid).Reussites }, 1, 1); len(l) != 1 || l[0].pid != 1 {
+	if l, _, _ := classer(func(pid uint64) uint32 { return resultats.statsDe(pid).Reussites }, 1, 1); len(l) != 1 || l[0].pid != 1 {
 		t.Fatalf("etendue 1+1 : %v", pids(l))
 	}
 	pts := pointsCreateur()
-	if l, _ := classer(func(pid uint64) uint32 { return pts[pid] }, 0, 10); len(l) != 1 || l[0].pid != 3 || l[0].score != 2 {
+	if l, _, _ := classer(func(pid uint64) uint32 { return pts[pid] }, 0, 10); len(l) != 1 || l[0].pid != 3 || l[0].score != 2 {
 		t.Fatalf("50/58 : %+v, attendu le joueur 3 avec 2 coeurs", l)
 	}
 	// Sans aucun coeur, les parties jouees sur ses niveaux comptent (les J'aime ne
@@ -55,7 +55,7 @@ func TestClassementsDeJoueurs(t *testing.T) {
 	if pts := pointsCreateur(); pts[3] != 42 {
 		t.Fatalf("points du createur 3 : %d, attendu 40 parties + 2 coeurs", pts[3])
 	}
-	if l, _ := classer(func(pid uint64) uint32 { return endless.recordsDe(pid)[2] }, 0, 10); len(l) != 1 || l[0].pid != 1 {
+	if l, _, _ := classer(func(pid uint64) uint32 { return endless.recordsDe(pid)[2] }, 0, 10); len(l) != 1 || l[0].pid != 1 {
 		t.Fatalf("51 expert : %v, attendu [1]", pids(l))
 	}
 

@@ -114,7 +114,32 @@ func ecrireCourseInfo(out *nex.StreamOut, c *courseMeta, options uint32) {
 		nex.WriteMap(f, map[uint8]uint32{}, func(o *nex.StreamOut, k uint8) { o.U8(k) }, func(o *nex.StreamOut, v uint32) { o.U32(v) })
 	}
 	r := resultats.lire(c.DataID)
-	{
+	// DEUX FORMES, ET LE CHOIX ENTRE ELLES EST LE COEUR DU PROBLEME DES J'AIME.
+	//
+	// Table des notes VIDE : le jeu desactive les boutons J'aime / Bouh. REMPLIE : il
+	// plantait a l'entree de Course World — trois essais le 2026-10-02 (zeros ; cle 2
+	// >= 1 ; toutes les cles de Nintendo), tous remplis pour TOUS les niveaux, y compris
+	// ceux que personne n'a joues. Or dans chaque fiche mesuree chez Nintendo (sept le
+	// 2026-10-02, deux le 2026-10-05), parties, tentatives et reussites sont non nulles :
+	// un niveau publie a au moins la partie de verification de son createur. Le jeu
+	// divise vraisemblablement par l'une d'elles quand il a des notes a afficher.
+	//
+	// On ne remplit donc la forme complete de Nintendo — statistiques 0 a 4 dans l'ordre,
+	// notes {coeurs, bouh, base}, table 0x40 a deux cles — QUE pour un niveau dont aucun
+	// diviseur ne peut etre nul. Tous les autres gardent EXACTEMENT la forme d'avant, qui
+	// ne plante pas.
+	if r.Parties > 0 && r.Tentatives > 0 && r.Reussites > 0 {
+		ecrireTable(f, []uint32{r.Parties, r.Tentatives, 0, r.Reussites, 0})
+		aime, bouh, _ := notes.compte(c.DataID)
+		base := r.Parties
+		if base < aime+bouh {
+			base = aime + bouh
+		}
+		ecrireTable(f, []uint32{aime, bouh, base})
+		// 0x40 : « coeurs et parties de la semaine » selon ocw-server ; {0, 0} figure
+		// tel quel dans une fiche de Nintendo. Pas d'historique hebdomadaire chez nous.
+		ecrireTable(f, []uint32{0, 0})
+	} else {
 		// Cles documentees : 0 parties, 1 tentatives, 3 reussites. On n'ecrit que
 		// celles dont on connait le sens ; les cles 2 et 4 restent absentes plutot que
 		// remplies de zeros qui affirmeraient « zero partie en versus » alors qu'on ne
@@ -122,15 +147,9 @@ func ecrireCourseInfo(out *nex.StreamOut, c *courseMeta, options uint32) {
 		nex.WriteMap(f, map[uint8]uint32{0: r.Parties, 1: r.Tentatives, 3: r.Reussites},
 			func(o *nex.StreamOut, k uint8) { o.U8(k) },
 			func(o *nex.StreamOut, v uint32) { o.U32(v) })
+		vide() // Ratings : vide, voir plus haut
+		vide() // Unk4
 	}
-	// LA TABLE DES NOTES RESTE VIDE. Le 2026-10-02 on l'a remplie — {0: coeurs, 1: bouh,
-	// 2: sans note}, tous a zero puisque personne n'avait encore note — et le jeu PLANTAIT
-	// a l'entree de Course World, juste apres la 84 (deux fois sur deux, retour arriere
-	// immediat). Une table vide, il la lit comme « pas de donnee ». Le sens de la cle 2
-	// n'est pas connu et le jeu s'en sert vraisemblablement comme diviseur : on ne la
-	// remplira qu'apres l'avoir mesuree. Les notes restent ENREGISTREES (smm2_notes.go).
-	vide() // Ratings
-	vide() // Unk4
 	{
 		// CourseTimeStats : PID, PID, Uint32, Uint32 — pas trois Uint32 comme je l'avais
 		// ecrit de tete. Sur Switch un PID fait huit octets, donc mon erreur decalait la
@@ -246,6 +265,15 @@ func tagOuZero(tags []string, n int) uint32 {
 		return 0
 	}
 	return uint32(v)
+}
+
+// ecrireTable ecrit une Map<Uint8, Uint32> aux cles 0, 1, 2… DANS L'ORDRE, comme Nintendo.
+func ecrireTable(f *nex.StreamOut, valeurs []uint32) {
+	f.U32(uint32(len(valeurs)))
+	for i, v := range valeurs {
+		f.U8(uint8(i))
+		f.U32(v)
+	}
 }
 
 // fichierDeVignette : le type sous lequel la console a TELEVERSE l'image que le

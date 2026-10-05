@@ -12,7 +12,7 @@ package main
 //
 //	50 points de createur  parties jouees sur ses niveaux + coeurs recus
 //	51 mode sans fin       record de niveaux enchaines, dans la difficulte demandee
-//	57 reussites           niveaux termines
+//	57 parties             parties jouees (cle 0 des statistiques, comme Nintendo)
 //	58 sur la periode      points de createur (pas d'historique par semaine : deduit)
 //
 // Un joueur sans score ou sans profil n'apparait pas : le fabriquer afficherait un nom
@@ -73,7 +73,7 @@ func pointsCreateur() map[uint64]uint32 {
 // classer trie par score decroissant (PID croissant a egalite, pour un ordre stable),
 // ecarte les scores nuls et les joueurs sans profil, puis applique l'etendue demandee.
 // Les rangs sont ceux d'une competition : deux egaux partagent le rang, le suivant saute.
-func classer(score func(pid uint64) uint32, depart, nombre uint32) ([]entreeClassement, []uint32) {
+func classer(score func(pid uint64) uint32, depart, nombre uint32) ([]entreeClassement, []uint32, bool) {
 	var l []entreeClassement
 	for pid := range candidatsClassement() {
 		v := score(pid)
@@ -100,13 +100,15 @@ func classer(score func(pid uint64) uint32, depart, nombre uint32) ([]entreeClas
 		}
 	}
 	if int(depart) >= len(l) {
-		return nil, nil
+		return nil, nil, false
 	}
 	fin := len(l)
 	if nombre > 0 && int(depart)+int(nombre) < fin {
 		fin = int(depart) + int(nombre)
 	}
-	return l[depart:fin], rangs[depart:fin]
+	// Le booleen final : VRAI quand il reste des joueurs apres cette page. Nintendo le met
+	// a vrai en rendant 100 joueurs sur 100 demandes (mesure 2026-10-05).
+	return l[depart:fin], rangs[depart:fin], fin < len(l)
 }
 
 // lirePlage lit un ResultRange encadre : { Uint32 depart, Uint32 nombre }.
@@ -116,7 +118,7 @@ func lirePlage(p *nex.StreamIn) (uint32, uint32) {
 	return rr.U32(), rr.U32()
 }
 
-func repondreClassement(conn *nex.Connection, req *nex.RMCMessage, nom string, l []entreeClassement, rangs []uint32) *nex.RMCMessage {
+func repondreClassement(conn *nex.Connection, req *nex.RMCMessage, nom string, l []entreeClassement, rangs []uint32, encore bool) *nex.RMCMessage {
 	s := conn.Settings
 	out := nex.NewStreamOut(s)
 	out.U32(uint32(len(l)))
@@ -128,8 +130,8 @@ func repondreClassement(conn *nex.Connection, req *nex.RMCMessage, nom string, l
 	for _, r := range rangs {
 		out.U32(r)
 	}
-	out.Bool(false)
-	fmt.Printf("[SMM2 Classements] %s pid=%d -> %d joueur(s)\n", nom, conn.PID, len(l))
+	out.Bool(encore)
+	fmt.Printf("[SMM2 Classements] %s pid=%d -> %d joueur(s), suite=%v\n", nom, conn.PID, len(l), encore)
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
 }
 
@@ -142,8 +144,8 @@ func smm2SearchUsersUserPoint(conn *nex.Connection, req *nex.RMCMessage) *nex.RM
 	_ = p.Buffer()
 	depart, nombre := lirePlage(p)
 	pts := pointsCreateur()
-	l, r := classer(func(pid uint64) uint32 { return pts[pid] }, depart, nombre)
-	return repondreClassement(conn, req, "search_users_user_point(50)", l, r)
+	l, r, encore := classer(func(pid uint64) uint32 { return pts[pid] }, depart, nombre)
+	return repondreClassement(conn, req, "search_users_user_point(50)", l, r, encore)
 }
 
 // 51 SearchUsersEndlessMode : { Uint8 difficulte, Uint32 option, Buffer, ResultRange }.
@@ -155,8 +157,8 @@ func smm2SearchUsersEndlessMode(conn *nex.Connection, req *nex.RMCMessage) *nex.
 	_ = p.U32()
 	_ = p.Buffer()
 	depart, nombre := lirePlage(p)
-	l, r := classer(func(pid uint64) uint32 { return endless.recordsDe(pid)[difficulte%4] }, depart, nombre)
-	return repondreClassement(conn, req, fmt.Sprintf("search_users_endless_mode(51) difficulte=%d", difficulte), l, r)
+	l, r, encore := classer(func(pid uint64) uint32 { return endless.recordsDe(pid)[difficulte%4] }, depart, nombre)
+	return repondreClassement(conn, req, fmt.Sprintf("search_users_endless_mode(51) difficulte=%d", difficulte), l, r, encore)
 }
 
 // 57 SearchUsersClearRanking : { Uint8, Uint32 option, Buffer, ResultRange }. Le Uint8
@@ -169,8 +171,12 @@ func smm2SearchUsersClearRanking(conn *nex.Connection, req *nex.RMCMessage) *nex
 	_ = p.U32()
 	_ = p.Buffer()
 	depart, nombre := lirePlage(p)
-	l, r := classer(func(pid uint64) uint32 { return resultats.statsDe(pid).Reussites }, depart, nombre)
-	return repondreClassement(conn, req, fmt.Sprintf("search_users_clear_ranking(57) u8=%d", categorie), l, r)
+	// Nintendo ordonne cet onglet par la cle 0 des statistiques du joueur (mesure
+	// 2026-10-05 : 1263398, 1141888, 976284… strictement decroissants), et c'est la cle 0
+	// de NOTRE UserInfo — les parties — qu'affiche chaque ligne. Classer par reussites
+	// montrait un ordre qui ne correspondait pas aux nombres affiches.
+	l, r, encore := classer(func(pid uint64) uint32 { return resultats.statsDe(pid).Parties }, depart, nombre)
+	return repondreClassement(conn, req, fmt.Sprintf("search_users_clear_ranking(57) u8=%d", categorie), l, r, encore)
 }
 
 // 58 SearchUsersTermsRanking : { Uint32 option, ResultRange, Buffer }.
@@ -181,6 +187,6 @@ func smm2SearchUsersTermsRanking(conn *nex.Connection, req *nex.RMCMessage) *nex
 	_ = p.U32()
 	depart, nombre := lirePlage(p)
 	pts := pointsCreateur()
-	l, r := classer(func(pid uint64) uint32 { return pts[pid] }, depart, nombre)
-	return repondreClassement(conn, req, "search_users_terms_ranking(58)", l, r)
+	l, r, encore := classer(func(pid uint64) uint32 { return pts[pid] }, depart, nombre)
+	return repondreClassement(conn, req, "search_users_terms_ranking(58)", l, r, encore)
 }
