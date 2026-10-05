@@ -53,8 +53,11 @@ type magasinNotes struct {
 	// Donnees : joueur -> nombre de notes donnees, pour le quota de la 61.
 	Donnees map[uint64]uint32 `json:"donnees"`
 	// Morts : niveau -> les marques, les plus recentes a la fin.
-	Morts  map[uint64][]marqueMort `json:"morts"`
-	chemin string
+	Morts map[uint64][]marqueMort `json:"morts"`
+	// Progres : niveau -> joueur -> 2 joue, 3 reussi. Pour que la fiche d'un niveau dise
+	// a CE joueur ou il en est, comme chez Nintendo (premier des quatre octets).
+	Progres map[uint64]map[uint64]uint8 `json:"progres,omitempty"`
+	chemin  string
 }
 
 var notes = &magasinNotes{Notes: map[uint64]map[uint64]uint8{}, Donnees: map[uint64]uint32{}, Morts: map[uint64][]marqueMort{}}
@@ -74,6 +77,9 @@ func (m *magasinNotes) charger(dir string) {
 			}
 			if c.Morts != nil {
 				m.Morts = c.Morts
+			}
+			if c.Progres != nil {
+				m.Progres = c.Progres
 			}
 		}
 	}
@@ -115,6 +121,53 @@ func (m *magasinNotes) noter(dataID, pid uint64, note uint8) {
 }
 
 // compte rend les trois cles de la table des notes de CourseInfo.
+// avancer retient l'etat d'un joueur sur un niveau ; il ne recule jamais (un niveau
+// reussi le reste meme si l'on y meurt ensuite).
+func (m *magasinNotes) avancer(dataID, pid uint64, etat uint8) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.Progres == nil {
+		m.Progres = map[uint64]map[uint64]uint8{}
+	}
+	parPID := m.Progres[dataID]
+	if parPID == nil {
+		parPID = map[uint64]uint8{}
+		m.Progres[dataID] = parPID
+	}
+	if etat > parPID[pid] {
+		parPID[pid] = etat
+		m.ecrireLocked()
+	}
+}
+
+// etatJoueur rend les deux premiers des quatre octets de CourseInfo pour CE joueur
+// (mesure chez Nintendo, 2026-10-05) : son etat — 1 jamais joue, 2 joue, 3 reussi — et
+// sa note — 1 aucune, 2 joue sans noter, 3 J'aime, 4 Bouh.
+func (m *magasinNotes) etatJoueur(dataID, pid uint64) (uint8, uint8) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	etat := m.Progres[dataID][pid]
+	n, note := m.Notes[dataID][pid]
+	if note && etat == 0 {
+		// Notes anterieures au suivi : une note « aucune » n'arrive qu'a la reussite
+		// (104 avec l'indicateur de reussite), une vraie note prouve au moins une partie.
+		etat = 2
+		if n == noteAucune {
+			etat = 3
+		}
+	}
+	if etat == 0 {
+		return 1, 1
+	}
+	switch {
+	case note && n == noteAime:
+		return etat, 3
+	case note && n == noteBouh:
+		return etat, 4
+	}
+	return etat, 2
+}
+
 func (m *magasinNotes) compte(dataID uint64) (aime, bouh, sans uint32) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -213,6 +266,13 @@ func smm2PostRatingInfo(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessa
 		return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
 	}
 	notes.noter(dataID, conn.PID, note)
+	// Le premier Uint8 apres la note vaut 1 quand la 104 suit une reussite (mesure : la
+	// 104 automatique de fin de niveau porte 0, 1, vrai).
+	if b == 1 {
+		notes.avancer(dataID, conn.PID, 3)
+	} else {
+		notes.avancer(dataID, conn.PID, 2)
+	}
 	aime, bouh, _ := notes.compte(dataID)
 	fmt.Printf("[SMM2 Notes] post_rating_info(104) pid=%d niveau=%d note=%d (%d, %v) -> %d coeur(s), %d bouh\n",
 		conn.PID, dataID, note, b, c, aime, bouh)

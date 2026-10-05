@@ -115,7 +115,7 @@ func repondreNiveaux(conn *nex.Connection, req *nex.RMCMessage, nom string, avec
 	out := nex.NewStreamOut(s)
 	out.U32(uint32(len(liste)))
 	for _, m := range liste {
-		ecrireCourseInfo(out, m, options)
+		ecrireCourseInfo(out, m, options, conn.PID)
 	}
 	if avecRangs {
 		// Un rang par niveau, dans l'ordre rendu. On ne classe pas encore : le rang est
@@ -171,7 +171,7 @@ func smm2SearchCoursesPickUp(conn *nex.Connection, req *nex.RMCMessage) *nex.RMC
 	out := nex.NewStreamOut(s)
 	out.U32(uint32(len(liste)))
 	for _, m := range liste {
-		ecrireCourseInfo(out, m, options)
+		ecrireCourseInfo(out, m, options, conn.PID)
 	}
 	fmt.Printf("[SMM2 Courses] search_courses_pickup(84) pid=%d options=0x%x nombre=%d u8=%d -> %d niveau(x)\n",
 		conn.PID, options, nombre, inconnu, len(liste))
@@ -240,7 +240,7 @@ func smm2SearchCoursesEndlessMode(conn *nex.Connection, req *nex.RMCMessage) *ne
 	out := nex.NewStreamOut(s)
 	out.U32(uint32(len(liste)))
 	for _, m := range liste {
-		ecrireCourseInfo(out, m, options)
+		ecrireCourseInfo(out, m, options, conn.PID)
 	}
 
 	fmt.Printf("[SMM2 Courses] search_courses_endless(79) pid=%d options=0x%x demande=%d difficulte=%d -> %d niveau(x)\n",
@@ -297,7 +297,7 @@ func smm2SearchCoursesMultijoueur(conn *nex.Connection, req *nex.RMCMessage) *ne
 	out := nex.NewStreamOut(s)
 	out.U32(uint32(len(liste)))
 	for _, m := range liste {
-		ecrireCourseInfo(out, m, options)
+		ecrireCourseInfo(out, m, options, conn.PID)
 	}
 
 	fmt.Printf("[SMM2 Courses] search_courses_multi(78) pid=%d options=0x%x demande=%d difficulte=%d -> %d niveau(x)\n",
@@ -545,7 +545,7 @@ func smm2SearchCoursesAdvanced(conn *nex.Connection, req *nex.RMCMessage) *nex.R
 	out := nex.NewStreamOut(s)
 	out.U32(uint32(len(liste)))
 	for _, m := range liste {
-		ecrireCourseInfo(out, m, options)
+		ecrireCourseInfo(out, m, options, conn.PID)
 	}
 	out.Bool(true)
 
@@ -710,7 +710,7 @@ func smm2SearchCoursesBattleMode(conn *nex.Connection, req *nex.RMCMessage) *nex
 	out := nex.NewStreamOut(s)
 	out.U32(uint32(len(liste)))
 	for _, m := range liste {
-		ecrireCourseInfo(out, m, options)
+		ecrireCourseInfo(out, m, options, conn.PID)
 	}
 
 	fmt.Printf("[SMM2 Courses] search_courses_battle(77) pid=%d options=0x%x demande=%d -> %d niveau(x)\n",

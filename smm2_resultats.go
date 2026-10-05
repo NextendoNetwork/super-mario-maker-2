@@ -261,6 +261,13 @@ func smm2PostPlayResult(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessa
 	}
 	r := resultats.lire(dataID)
 
+	// L'etat du joueur sur ce niveau, pour sa fiche (voir notes.etatJoueur).
+	if termine {
+		notes.avancer(dataID, conn.PID, 3)
+	} else {
+		notes.avancer(dataID, conn.PID, 2)
+	}
+
 	// La marque de mort de l'essai : une structure de 13 octets apres le temps, nulle
 	// quand le niveau est reussi (mesure, voir smm2_notes.go).
 	if !termine {

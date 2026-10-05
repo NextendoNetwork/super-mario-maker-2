@@ -118,7 +118,7 @@ func smm2GetUserOrCourse(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMess
 	} else {
 		nex.EcrireUserInfo(out, nex.SMM2Profil{})
 	}
-	ecrireCourseInfo(out, m, optCourse)
+	ecrireCourseInfo(out, m, optCourse, conn.PID)
 
 	quoi := "UserInfo vide + le niveau"
 	if mode == 1 {

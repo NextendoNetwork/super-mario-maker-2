@@ -70,7 +70,7 @@ func codeNiveau(dataID uint64) string {
 }
 
 // ecrireCourseInfo serialise un niveau. `options` est le masque envoye par le client.
-func ecrireCourseInfo(out *nex.StreamOut, c *courseMeta, options uint32) {
+func ecrireCourseInfo(out *nex.StreamOut, c *courseMeta, options uint32, pid uint64) {
 	s := out.Settings
 	f := nex.NewStreamOut(s)
 
@@ -218,8 +218,13 @@ func ecrireCourseInfo(out *nex.StreamOut, c *courseMeta, options uint32) {
 		}
 		return 0
 	}
-	f.U8(octet(1))
-	f.U8(octet(2))
+	// Les deux premiers disent a CE joueur ou il en est et ce qu'il a note.
+	etat, sa := notes.etatJoueur(c.DataID, pid)
+	if masque&3 != 3 {
+		etat, sa = octet(1), octet(2)
+	}
+	f.U8(etat)
+	f.U8(sa)
 	f.U8(octet(4))
 	f.U8(octet(8))
 	// Types releves dans la documentation, pas devines : 2 = vignette d'un ecran,
@@ -418,7 +423,7 @@ func smm2GetCourses(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
 	out.U32(uint32(n))
 	for _, r := range res {
 		if r.ok {
-			ecrireCourseInfo(out, r.m, options)
+			ecrireCourseInfo(out, r.m, options, conn.PID)
 		}
 	}
 	out.U32(uint32(len(res)))
@@ -528,7 +533,7 @@ func smm2SearchCoursesPostedBy(conn *nex.Connection, req *nex.RMCMessage) *nex.R
 	out := nex.NewStreamOut(s)
 	out.U32(uint32(len(liste)))
 	for _, m := range liste {
-		ecrireCourseInfo(out, m, options)
+		ecrireCourseInfo(out, m, options, conn.PID)
 	}
 	out.Bool(true)
 

@@ -96,7 +96,7 @@ func TestCourseInfoRendLeMeta(t *testing.T) {
 	s := nex.NewSwitchSettings(accessKey, nexVersion)
 	meta := "4571639bb04a3e65bc31130dbcbab7458f794a28437587ea1f1caedb098c9fd055f1c271262a5b3e01f78f92330f12e3"
 	out := nex.NewStreamOut(s)
-	ecrireCourseInfo(out, &courseMeta{DataID: 9026, Name: "n", MetaHex: meta}, 0x1ff)
+	ecrireCourseInfo(out, &courseMeta{DataID: 9026, Name: "n", MetaHex: meta}, 0x1ff, 0)
 	in := nex.NewStreamIn(out.Bytes(), s)
 	_ = in.U8()
 	p := in.Substream()
@@ -125,7 +125,7 @@ func TestCourseInfoRendLeMeta(t *testing.T) {
 func TestCourseInfoQuatreOctets(t *testing.T) {
 	s := nex.NewSwitchSettings(accessKey, nexVersion)
 	out := nex.NewStreamOut(s)
-	ecrireCourseInfo(out, &courseMeta{DataID: 9026, Name: "n"}, 0x1ff)
+	ecrireCourseInfo(out, &courseMeta{DataID: 9026, Name: "n"}, 0x1ff, 0)
 	b := out.Bytes()
 	// Les quatre octets precedent les deux structures de vignette : on les retrouve en
 	// relisant la fiche jusqu'a la table des commentaires.

@@ -94,7 +94,7 @@ func TestCourseInfoNotesVides(t *testing.T) {
 	s := nex.NewSwitchSettings(accessKey, nexVersion)
 	notes.noter(77, 1, noteAime)
 	out := nex.NewStreamOut(s)
-	ecrireCourseInfo(out, &courseMeta{DataID: 77, Name: "n"}, 0x1ff)
+	ecrireCourseInfo(out, &courseMeta{DataID: 77, Name: "n"}, 0x1ff, 0)
 	in := nex.NewStreamIn(out.Bytes(), s)
 	_ = in.U8()
 	p := in.Substream()
@@ -142,7 +142,7 @@ func TestCourseInfoNotesSeulementSiJoue(t *testing.T) {
 	s := nex.NewSwitchSettings(accessKey, nexVersion)
 	tables := func(dataID uint64) [3][]uint8 {
 		out := nex.NewStreamOut(s)
-		ecrireCourseInfo(out, &courseMeta{DataID: dataID, Name: "n"}, 0x1ff)
+		ecrireCourseInfo(out, &courseMeta{DataID: dataID, Name: "n"}, 0x1ff, 0)
 		in := nex.NewStreamIn(out.Bytes(), s)
 		_ = in.U8()
 		p := in.Substream()
@@ -178,5 +178,34 @@ func TestCourseInfoNotesSeulementSiJoue(t *testing.T) {
 	}
 	if got := tables(78); len(got[1]) != 0 || len(got[2]) != 0 {
 		t.Fatalf("niveau jamais termine : cles %v, attendu notes et 0x40 vides", got)
+	}
+}
+
+// TestEtatJoueurDansLaFiche : les deux premiers des quatre octets disent a CE joueur ou
+// il en est (1 jamais joue, 2 joue, 3 reussi) et ce qu'il a note (1 aucune, 2 joue sans
+// noter, 3 J'aime, 4 Bouh) — les combinaisons mesurees chez Nintendo le 2026-10-05.
+func TestEtatJoueurDansLaFiche(t *testing.T) {
+	defer isolerNotes(t)()
+	cas := []struct {
+		nom        string
+		faire      func()
+		etat, note uint8
+	}{
+		{"jamais joue", func() {}, 1, 1},
+		{"mort puis Bouh", func() { notes.avancer(1, 7, 2); notes.noter(1, 7, noteBouh) }, 2, 4},
+		{"mort puis J'aime", func() { notes.avancer(2, 7, 2); notes.noter(2, 7, noteAime) }, 2, 3},
+		{"reussi sans noter", func() { notes.avancer(3, 7, 3); notes.noter(3, 7, noteAucune) }, 3, 2},
+		{"reussi puis mort", func() { notes.avancer(4, 7, 3); notes.avancer(4, 7, 2) }, 3, 2},
+		{"note ancienne « aucune »", func() { notes.noter(5, 7, noteAucune) }, 3, 2},
+	}
+	for i, c := range cas {
+		c.faire()
+		if e, n := notes.etatJoueur(uint64(i), 7); e != c.etat || n != c.note {
+			t.Errorf("%s : (%d, %d), attendu (%d, %d)", c.nom, e, n, c.etat, c.note)
+		}
+	}
+	// Un autre joueur ne voit pas l'etat du premier.
+	if e, n := notes.etatJoueur(1, 8); e != 1 || n != 1 {
+		t.Errorf("autre joueur : (%d, %d), attendu (1, 1)", e, n)
 	}
 }
