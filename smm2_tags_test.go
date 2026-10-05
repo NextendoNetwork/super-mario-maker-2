@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"strings"
 	"testing"
 
@@ -85,5 +86,35 @@ func TestVignettesDeCourseInfo(t *testing.T) {
 	if un < 0 || entier < 0 || un > entier || strings.Contains(b, "/object/103") {
 		t.Fatalf("vignettes : un ecran en %d, niveau entier en %d, signalement present=%v",
 			un, entier, strings.Contains(b, "/object/103"))
+	}
+}
+
+// TestCourseInfoRendLeMeta : le qBuffer de CourseInfo rend les 48 octets recus a la
+// publication (MetaHex). Chez Nintendo il fait toujours 48 octets, fixes par niveau ;
+// nous envoyions un bloc vide (mesure 2026-10-05).
+func TestCourseInfoRendLeMeta(t *testing.T) {
+	s := nex.NewSwitchSettings(accessKey, nexVersion)
+	meta := "4571639bb04a3e65bc31130dbcbab7458f794a28437587ea1f1caedb098c9fd055f1c271262a5b3e01f78f92330f12e3"
+	out := nex.NewStreamOut(s)
+	ecrireCourseInfo(out, &courseMeta{DataID: 9026, Name: "n", MetaHex: meta}, 0x1ff)
+	in := nex.NewStreamIn(out.Bytes(), s)
+	_ = in.U8()
+	p := in.Substream()
+	p.U64()
+	_ = p.String()
+	p.PID()
+	_ = p.String()
+	_ = p.String()
+	p.U8()
+	p.U8()
+	p.DateTime()
+	for i := 0; i < 4; i++ {
+		p.U8()
+	}
+	p.U32()
+	p.U16()
+	p.U16()
+	if got := hex.EncodeToString(p.QBuffer()); got != meta {
+		t.Fatalf("qBuffer %q, attendu le meta de la publication", got)
 	}
 }

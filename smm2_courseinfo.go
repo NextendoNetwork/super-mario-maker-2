@@ -27,6 +27,7 @@ package main
 // Structures relevees dans la documentation PretendoNetwork.
 
 import (
+	"encoding/hex"
 	"fmt"
 	"os"
 	"sort"
@@ -107,7 +108,12 @@ func ecrireCourseInfo(out *nex.StreamOut, c *courseMeta, options uint32) {
 	f.U32(c.Condition)   // clear condition
 	f.U16(c.CondAmpleur) // clear condition magnitude
 	f.U16(0)
-	f.QBuffer(nil)
+	// LE BLOC DE 48 OCTETS QUE LA CONSOLE ENVOIE A LA PUBLICATION (66), rendu tel quel.
+	// Mesure 2026-10-05 : chez Nintendo ce qBuffer fait TOUJOURS 48 octets d'apparence
+	// aleatoire, mais identiques pour un meme niveau d'une consultation a l'autre (meme
+	// valeur dans la 70 et la 84). Et chacun des 1070 niveaux de notre catalogue a garde
+	// exactement 48 octets de la 66 (MetaHex). Nous l'avions et envoyions un bloc VIDE.
+	f.QBuffer(metaDuNiveau(c))
 
 	// --- champs conditionnels, dans l'ordre EXACT du tableau documente ---
 	vide := func() {
@@ -246,6 +252,15 @@ func tagOuZero(tags []string, n int) uint32 {
 		return 0
 	}
 	return uint32(v)
+}
+
+// metaDuNiveau : le bloc de metadonnees recu a la publication, ou rien s'il manque.
+func metaDuNiveau(c *courseMeta) []byte {
+	b, err := hex.DecodeString(c.MetaHex)
+	if err != nil {
+		return nil
+	}
+	return b
 }
 
 // fichierDeVignette : le type sous lequel la console a TELEVERSE l'image que le
