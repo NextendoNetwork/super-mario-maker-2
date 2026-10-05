@@ -170,11 +170,25 @@ func smm2SearchCoursesPickUp(conn *nex.Connection, req *nex.RMCMessage) *nex.RMC
 // Parametre documente : resultOption (Uint32), count (Uint32), difficulty (Uint8).
 // Reponse : List<CourseInfo>, sans booleen final — contrairement aux autres recherches.
 //
-// LA DIFFICULTE EST IGNOREE, ET C'EST UN CHOIX. Elle vit dans l'en-tete binaire du
-// niveau, qu'on stocke sans l'interpreter. Filtrer dessus exigerait de deviner un champ
-// qu'on ne sait pas lire ; on rend donc tous les niveaux quelle que soit la difficulte
-// demandee. Consequence assumee : les quatre difficultes proposent le meme choix. Mieux
-// vaut un choix honnete et complet qu'un tri au hasard qui vide trois menus sur quatre.
+// La difficulte est calculee pour chaque niveau par difficulteNiveau, comme dans
+// CourseInfo. Filtrer avant de limiter le nombre evite qu'une page de niveaux recents
+// d'une autre difficulte masque ceux que le joueur a demandes.
+func niveauxEndless(liste []*courseMeta, difficulte uint8, nombre uint32) []*courseMeta {
+	if difficulte > diffSuperExpert {
+		return nil
+	}
+	var retenus []*courseMeta
+	for _, m := range liste {
+		if difficulteNiveau(m) == difficulte {
+			retenus = append(retenus, m)
+			if nombre > 0 && uint32(len(retenus)) >= nombre {
+				break
+			}
+		}
+	}
+	return retenus
+}
+
 func smm2SearchCoursesEndlessMode(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
 	s := conn.Settings
 
@@ -192,10 +206,7 @@ func smm2SearchCoursesEndlessMode(conn *nex.Connection, req *nex.RMCMessage) *ne
 	// de niveaux qu'apres avoir initialise la partie.
 	SondeAcceptee(79, 109)
 
-	liste := niveauxPublics()
-	if nombre > 0 && nombre < uint32(len(liste)) {
-		liste = liste[:nombre]
-	}
+	liste := niveauxEndless(niveauxPublics(), difficulte, nombre)
 	if os.Getenv("SMM2_COURSEINFO") != "1" {
 		liste = nil
 	}
