@@ -197,20 +197,6 @@ func smm2InitEndlessMode(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMess
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
 }
 
-// smm2SearchUsersClearRanking (57) : le classement des joueurs.
-//
-// Reponse : List<UserInfo>, List<Uint32>, Bool. Vide, vide, faux — il n'y a pas encore
-// de classement a montrer, et le fabriquer afficherait des joueurs inexistants.
-func smm2SearchUsersClearRanking(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
-	s := conn.Settings
-	out := nex.NewStreamOut(s)
-	listeVide(out) // utilisateurs
-	listeVide(out) // Uint32 associes
-	out.Bool(false)
-	fmt.Printf("[SMM2 Divers] search_users_clear_ranking(57) pid=%d -> 0\n", conn.PID)
-	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
-}
-
 // smm2SearchCoursesFolloweePostedBy (82) : les niveaux des createurs suivis.
 //
 // Reponse : List<CourseInfo>, Bool. Nextendo n'a pas encore de systeme d'abonnements,

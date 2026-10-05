@@ -98,9 +98,14 @@ func smm2DataStoreHandler() nex.RMCHandler {
 		case 73:
 			// SearchCoursesLatest : l'onglet « Nouveautes ».
 			return smm2SearchCoursesLatest(conn, req)
-		case 58, 83:
-			// Onglets classes (Populaires).
+		case 83:
+			// SearchCoursesTermsRanking : onglets classes (Populaires) — des NIVEAUX.
 			return smm2SearchCoursesRanking(conn, req)
+		case 58:
+			// SearchUsersTermsRanking : un classement de JOUEURS (kinnay), et le masque
+			// d'options que le jeu y envoie (0x6625) n'est pas celui d'une CourseInfo.
+			// Nous y servions des niveaux.
+			return smm2SearchUsersTermsRanking(conn, req)
 		case 84:
 			// SearchCoursesPickUp : « A la une ».
 			return smm2SearchCoursesPickUp(conn, req)
@@ -122,6 +127,10 @@ func smm2DataStoreHandler() nex.RMCHandler {
 			return smm2GetEventCourseGhost(conn, req)
 		case 169:
 			return smm2GetEventCourseFriendGhost(conn, req)
+		case 50:
+			return smm2SearchUsersUserPoint(conn, req)
+		case 51:
+			return smm2SearchUsersEndlessMode(conn, req)
 		case 57:
 			return smm2SearchUsersClearRanking(conn, req)
 		case 59, 152:
