@@ -134,6 +134,7 @@ func main() {
 	// response (measured about 60 ms later). The immediate push arrives before
 	// SMM2 has installed the new room locally and leaves the host invisible.
 	mm.CreateSessionNotificationDelay = 100 * time.Millisecond
+	mm.NormalizeCreateSessionRV = true
 	// Et surtout : une liste de PID vide veut dire « toutes les sessions ouvertes ».
 	// C'est ce que SMM2 envoie en cooperatif (mesure : `findByParticipant(pids=[])`), et
 	// sans cela le drapeau ci-dessus ne sert a rien — l'ancien code bouclait sur une
