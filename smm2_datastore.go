@@ -22,9 +22,6 @@ var smm2EmptyBuilders = map[uint32]func(*nex.StreamOut){
 	// NOTE: get_users(48) reste en REPLAY — SMM2 exige un UserInfo valide (son PROPRE profil) au
 	// boot, une liste vide casse l'init. Le nettoyer proprement = construire un UserInfo dynamique
 	// pour le PID connecté (structure lourde, prochaine étape) au lieu de rejouer la session capturée.
-	53: func(o *nex.StreamOut) { o.U32(0) },                         // search_users_played_course: users[]
-	54: func(o *nex.StreamOut) { o.U32(0) },                         // search_users_cleared_course
-	55: func(o *nex.StreamOut) { o.U32(0) },                         // search_users_positive_rated_course
 	70: func(o *nex.StreamOut) { o.U32(0); o.U32(0) },               // get_courses: courses[], results[]
 	71: func(o *nex.StreamOut) { o.U32(0); o.U32(0); o.Bool(true) }, // point_ranking: courses[], ranks[], result
 	74: func(o *nex.StreamOut) { o.U32(0); o.Bool(true) },           // search_courses_posted_by
@@ -127,6 +124,12 @@ func smm2DataStoreHandler() nex.RMCHandler {
 			return smm2GetEventCourseGhost(conn, req)
 		case 169:
 			return smm2GetEventCourseFriendGhost(conn, req)
+		case 53:
+			return smm2SearchUsersPlayedCourse(conn, req)
+		case 54:
+			return smm2SearchUsersClearedCourse(conn, req)
+		case 55:
+			return smm2SearchUsersPositiveRatedCourse(conn, req)
 		case 50:
 			return smm2SearchUsersUserPoint(conn, req)
 		case 51:
