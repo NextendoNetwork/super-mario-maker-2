@@ -49,6 +49,12 @@ func TestClassementsDeJoueurs(t *testing.T) {
 	if l, _ := classer(func(pid uint64) uint32 { return pts[pid] }, 0, 10); len(l) != 1 || l[0].pid != 3 || l[0].score != 2 {
 		t.Fatalf("50/58 : %+v, attendu le joueur 3 avec 2 coeurs", l)
 	}
+	// Sans aucun coeur, les parties jouees sur ses niveaux comptent (les J'aime ne
+	// fonctionnent pas encore : sans cela, « No makers found » pour tous).
+	resultats.parNiv[500] = &resultatNiveau{Parties: 40}
+	if pts := pointsCreateur(); pts[3] != 42 {
+		t.Fatalf("points du createur 3 : %d, attendu 40 parties + 2 coeurs", pts[3])
+	}
 	if l, _ := classer(func(pid uint64) uint32 { return endless.recordsDe(pid)[2] }, 0, 10); len(l) != 1 || l[0].pid != 1 {
 		t.Fatalf("51 expert : %v, attendu [1]", pids(l))
 	}

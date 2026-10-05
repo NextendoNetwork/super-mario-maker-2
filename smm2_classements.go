@@ -10,7 +10,7 @@ package main
 //
 // Les scores sont ceux que Nextendo connait vraiment :
 //
-//	50 points de createur  coeurs recus sur ses niveaux publies
+//	50 points de createur  parties jouees sur ses niveaux + coeurs recus
 //	51 mode sans fin       record de niveaux enchaines, dans la difficulte demandee
 //	57 reussites           niveaux termines
 //	58 sur la periode      points de createur (pas d'historique par semaine : deduit)
@@ -53,12 +53,19 @@ func candidatsClassement() map[uint64]bool {
 	return pids
 }
 
-// pointsCreateur : les coeurs recus sur les niveaux publies de chaque joueur.
+// pointsCreateur : la popularite des niveaux publies de chaque joueur — les parties
+// qu'ils ont suscitees, plus les coeurs recus.
+//
+// Chez Nintendo les points de createur viennent des coeurs. Mais les boutons J'aime ne
+// fonctionnent pas encore chez nous (voir smm2_notes.go) : au 2026-10-05, les 94 notes
+// enregistrees valent toutes « aucune ». Classer par coeurs seuls donnait donc « No
+// makers found » a tout le monde. Les parties jouees par d'autres sont la mesure de
+// popularite qu'on possede vraiment ; les coeurs s'y ajouteront quand ils existeront.
 func pointsCreateur() map[uint64]uint32 {
 	pts := map[uint64]uint32{}
 	for _, m := range niveauxPublics() {
 		aime, _, _ := notes.compte(m.DataID)
-		pts[m.OwnerPID] += aime
+		pts[m.OwnerPID] += aime + resultats.lire(m.DataID).Parties
 	}
 	return pts
 }
