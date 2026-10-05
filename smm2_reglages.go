@@ -33,29 +33,19 @@ var smm2ReglagesEntiers = map[int]int32{
 
 // statsMultijoueurDe : la table multiplayer_stats du profil.
 //
-// Cles documentees par MariOver : 0 la NOTE du joueur, 2 les parties versus, 3 les
-// victoires versus, 10 les parties cooperatives, 11 les victoires cooperatives.
-//
-// POURQUOI ELLE CESSE D'ETRE VIDE. Le versus refuse de commencer : il interroge la methode
-// 117 avant meme d'appairer, et s'arrete quoi qu'on lui reponde. Or c'est un mode CLASSE,
-// et un mode classe a besoin de savoir dans quel rang ranger le joueur. Une table vide dit
-// « je n'ai aucune note pour toi ». C'est la piste la plus serieuse dont on dispose, et
-// elle ne peut rien casser : le cooperatif, lui, ne regarde pas cette table.
-//
-// LA NOTE DE DEPART EST UNE SUPPOSITION, et elle est reglable sans redeployer :
-//
-//	echo 1500 > /opt/smm2/smm2_9997.forme
-//
-// Les COMPTEURS restent a zero et c'est exact — les methodes qui rapportent le resultat
-// d'une partie multijoueur (101, 121, 122) tombent encore sur le repli generique, donc
-// nous ne comptons rien. Annoncer des victoires que nous n'avons pas vues serait inventer.
+// La capture Nintendo du 2026-10-02 donne, pour un compte sans parties Versus,
+// TOUTES les cles 0 a 14 : 0 vaut 0, 1 vaut 1, les autres valent 0 (sauf les
+// compteurs cooperatifs deja acquis). Nos cinq cles 0, 2, 3, 10, 11 omettaient
+// notamment la cle 1, et la note 1500 de la cle 0 etait une supposition.
+// Les compteurs restent a zero tant que les resultats de matches ne sont pas
+// enregistres. Le remplacement 9997 est conserve pour les essais controles.
 func statsMultijoueurDe(pid uint64) map[uint8]uint32 {
-	note := uint32(formeEssai(9997, 1500)) // 9997 : pas une methode, juste un nom de fichier
-	return map[uint8]uint32{
-		0:  note,
-		2:  0,
-		3:  0,
-		10: 0,
-		11: 0,
+	note := uint32(formeEssai(9997, 0)) // 9997 : pas une methode, juste un nom de fichier
+	stats := make(map[uint8]uint32, 15)
+	for i := uint8(0); i < 15; i++ {
+		stats[i] = 0
 	}
+	stats[0] = note
+	stats[1] = 1
+	return stats
 }

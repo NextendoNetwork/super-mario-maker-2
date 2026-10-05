@@ -154,7 +154,7 @@ func main() {
 	nex.SMM2RecordsEndlessFn = endless.recordsDe
 	// La table des parties, pour que le cooperatif serve LE MEME niveau a tout le monde.
 	MatchmakingSMM2 = mm
-	// La table multiplayer_stats : sans note, le versus ne demarre pas. Voir smm2_reglages.go.
+	// La table multiplayer_stats mesuree chez Nintendo. Voir smm2_reglages.go.
 	nex.SMM2StatsMultijoueurFn = statsMultijoueurDe
 
 	setupSMM2InitReplay(secureEndpoint)
