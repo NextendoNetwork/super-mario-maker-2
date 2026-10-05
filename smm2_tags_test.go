@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	nex "github.com/NextendoNetwork/nextendo-nex"
+)
 
 // TestTagOuZero : les etiquettes rangees par la 69 (codes decimaux) doivent ressortir dans
 // CourseInfo. Avant, tagOuZero rendait zero dans tous les cas et aucune etiquette ne
@@ -55,5 +60,30 @@ func TestMiniatureDeChoisitLaPrete(t *testing.T) {
 	}
 	if id, _ := miniatureDe(99, 2); id != 0 {
 		t.Fatalf("aucune vignette : %d, attendu 0", id)
+	}
+}
+
+// TestVignettesDeCourseInfo : la fiche annonce, pour la vignette d'un ecran (type 2 du
+// protocole), le fichier televerse en type 1 (640x360, signe), et pour celle du niveau
+// entier (type 3), le fichier televerse en type 2. Mesure 2026-10-05 : nous servions
+// l'inverse et le jeu affichait des frimousses tristes.
+func TestVignettesDeCourseInfo(t *testing.T) {
+	ancien, url := courses, storageURL
+	defer func() { courses, storageURL = ancien, url }()
+	storageURL = "https://exemple"
+	courses = &courseStore{byID: map[uint64]*courseMeta{
+		101: {DataID: 101, Name: "rel-77-1", Ready: true, Size: 114688},
+		102: {DataID: 102, Name: "rel-77-2", Ready: true, Size: 15673},
+		103: {DataID: 103, Name: "rel-77-3", Ready: true, Size: 18998},
+	}}
+	s := nex.NewSwitchSettings(accessKey, nexVersion)
+	out := nex.NewStreamOut(s)
+	ecrireMiniature(out, &courseMeta{DataID: 77}, 2)
+	ecrireMiniature(out, &courseMeta{DataID: 77}, 3)
+	b := string(out.Bytes())
+	un, entier := strings.Index(b, "/object/101"), strings.Index(b, "/object/102")
+	if un < 0 || entier < 0 || un > entier || strings.Contains(b, "/object/103") {
+		t.Fatalf("vignettes : un ecran en %d, niveau entier en %d, signalement present=%v",
+			un, entier, strings.Contains(b, "/object/103"))
 	}
 }

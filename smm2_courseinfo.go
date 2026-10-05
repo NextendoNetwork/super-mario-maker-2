@@ -209,7 +209,7 @@ func ecrireCourseInfo(out *nex.StreamOut, c *courseMeta, options uint32) {
 // deposes au moment de la publication.
 func ecrireMiniature(out *nex.StreamOut, c *courseMeta, relType uint8) {
 	s := out.Settings
-	id, taille := miniatureDe(c.DataID, relType)
+	id, taille := miniatureDe(c.DataID, fichierDeVignette(relType))
 
 	r := nex.NewStreamOut(s)
 	r.String(fmt.Sprintf("%s/object/%d", storageURL, id))
@@ -246,6 +246,29 @@ func tagOuZero(tags []string, n int) uint32 {
 		return 0
 	}
 	return uint32(v)
+}
+
+// fichierDeVignette : le type sous lequel la console a TELEVERSE l'image que le
+// protocole designe par relType. Les deux numerotations ne coincident pas, et c'est ce
+// qui donnait des vignettes a frimousse triste partout (mesure 2026-10-05 sur le
+// catalogue de production, par les dimensions des JPEG) :
+//
+//	televersee en 1 : 640x360, 114688 octets — la vignette d'UN ECRAN, deja signee par
+//	                  la console (bloc HMAC en fin de fichier, voir mm2srv/smm2_parsing)
+//	televersee en 2 : bande de 144 px de haut — la vignette du NIVEAU ENTIER
+//	televersee en 3 : bande de 216 px — celle du signalement
+//
+// Le protocole demande la vignette d'un ecran en type 2 et celle du niveau entier en
+// type 3. Nous servions donc la bande du niveau entier, non signee, a la place de la
+// vignette d'un ecran, et la vignette de signalement a la place du niveau entier.
+func fichierDeVignette(relType uint8) uint8 {
+	switch relType {
+	case 2:
+		return 1
+	case 3:
+		return 2
+	}
+	return relType
 }
 
 // miniatureDe retrouve le fichier rattache d'un type donne pour ce niveau. Ils sont

@@ -232,7 +232,7 @@ func ecrireReferenceFantome(out *nex.StreamOut, objet uint64, taille uint32) {
 // nom. La meme adresse que la vignette du niveau ; Nintendo n'envoie aucun en-tete.
 func ecrireMiniatureEvenement(out *nex.StreamOut, dataID uint64, relType uint8) {
 	s := out.Settings
-	id, taille := miniatureDe(dataID, relType)
+	id, taille := miniatureDe(dataID, fichierDeVignette(relType))
 	f := nex.NewStreamOut(s)
 	f.String(fmt.Sprintf("%s/object/%d", storageURL, id))
 	f.U32(0)
