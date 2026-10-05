@@ -173,6 +173,11 @@ func smm2SearchCoursesPickUp(conn *nex.Connection, req *nex.RMCMessage) *nex.RMC
 // La difficulte est calculee pour chaque niveau par difficulteNiveau, comme dans
 // CourseInfo. Filtrer avant de limiter le nombre evite qu'une page de niveaux recents
 // d'une autre difficulte masque ceux que le joueur a demandes.
+//
+// LE TIRAGE EST ALEATOIRE. On prenait les niveaux les plus recents, toujours dans le
+// meme ordre : chaque nouvelle partie commencait par le meme niveau et suivait la meme
+// suite (signale par Juan le 2026-10-05). Le mode sans fin est cense surprendre ; on
+// melange donc toute la difficulte avant de limiter.
 func niveauxEndless(liste []*courseMeta, difficulte uint8, nombre uint32) []*courseMeta {
 	if difficulte > diffSuperExpert {
 		return nil
@@ -181,13 +186,17 @@ func niveauxEndless(liste []*courseMeta, difficulte uint8, nombre uint32) []*cou
 	for _, m := range liste {
 		if difficulteNiveau(m) == difficulte {
 			retenus = append(retenus, m)
-			if nombre > 0 && uint32(len(retenus)) >= nombre {
-				break
-			}
 		}
+	}
+	melangerEndless(len(retenus), func(i, j int) { retenus[i], retenus[j] = retenus[j], retenus[i] })
+	if nombre > 0 && uint32(len(retenus)) > nombre {
+		retenus = retenus[:nombre]
 	}
 	return retenus
 }
+
+// melangerEndless : remplacable dans les tests.
+var melangerEndless = rand.Shuffle
 
 func smm2SearchCoursesEndlessMode(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
 	s := conn.Settings
