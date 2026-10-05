@@ -204,7 +204,14 @@ func ecrireCourseInfo(out *nex.StreamOut, c *courseMeta, options uint32) {
 	// commentaires ; ce n'etait pas eux — le coupable etait ailleurs (voir les booleens
 	// d'UserInfo et la methode 61). Rien n'a jamais montre qu'une autre valeur serve, et
 	// inventer un drapeau dont on ignore le sens finit toujours par se payer.
-	masque := uint32(formeEssai(9999, 0)) // 9999 : ce n'est pas une methode, juste un nom de fichier
+	// MESURE CHEZ NINTENDO (2026-10-05, 209 fiches des 70 et 84) : (1, 1, 1, 1) dans 202
+	// fiches. Les sept autres sont les niveaux que le joueur avait touches, et elles
+	// donnent le sens des deux premiers : etat du JOUEUR sur ce niveau — 1 jamais joue,
+	// 2 joue, 3 reussi — puis SA note — 1 aucune, 2 joue sans noter, 3 J'aime, 4 Bouh.
+	// Les deux derniers valent toujours 1. Nous envoyions (0, 0, 0, 0) : une note « 0 »
+	// n'existe pas, et c'est la cause la plus probable des boutons J'aime desactives.
+	// Defaut 15 = les quatre a 1 ; le fichier reste un moyen de revenir a 0.
+	masque := uint32(formeEssai(9999, 15)) // 9999 : ce n'est pas une methode, juste un nom de fichier
 	octet := func(bit uint32) uint8 {
 		if masque&bit != 0 {
 			return 1

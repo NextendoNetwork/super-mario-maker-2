@@ -118,3 +118,49 @@ func TestCourseInfoRendLeMeta(t *testing.T) {
 		t.Fatalf("qBuffer %q, attendu le meta de la publication", got)
 	}
 }
+
+// TestCourseInfoQuatreOctets : les quatre Uint8 apres la table des commentaires valent
+// (1, 1, 1, 1) par defaut, comme dans 202 des 209 fiches mesurees chez Nintendo. A zero,
+// la note du joueur valait « 0 », un etat qui n'existe pas (2026-10-05).
+func TestCourseInfoQuatreOctets(t *testing.T) {
+	s := nex.NewSwitchSettings(accessKey, nexVersion)
+	out := nex.NewStreamOut(s)
+	ecrireCourseInfo(out, &courseMeta{DataID: 9026, Name: "n"}, 0x1ff)
+	b := out.Bytes()
+	// Les quatre octets precedent les deux structures de vignette : on les retrouve en
+	// relisant la fiche jusqu'a la table des commentaires.
+	in := nex.NewStreamIn(b, s)
+	_ = in.U8()
+	p := in.Substream()
+	p.U64()
+	_ = p.String()
+	p.PID()
+	_ = p.String()
+	_ = p.String()
+	p.U8()
+	p.U8()
+	p.DateTime()
+	for i := 0; i < 4; i++ {
+		p.U8()
+	}
+	p.U32()
+	p.U16()
+	p.U16()
+	p.QBuffer()
+	for k := 0; k < 3; k++ {
+		for n := p.U32(); n > 0; n-- {
+			p.U8()
+			p.U32()
+		}
+	}
+	_ = p.U8()
+	_ = p.Substream() // CourseTimeStats
+	for n := p.U32(); n > 0; n-- {
+		p.U8()
+		p.U32()
+	}
+	got := [4]uint8{p.U8(), p.U8(), p.U8(), p.U8()}
+	if got != [4]uint8{1, 1, 1, 1} || p.Err() != nil {
+		t.Fatalf("quatre octets %v (err %v), attendu [1 1 1 1]", got, p.Err())
+	}
+}
