@@ -250,16 +250,32 @@ func tagOuZero(tags []string, n int) uint32 {
 
 // miniatureDe retrouve le fichier rattache d'un type donne pour ce niveau. Ils sont
 // enregistres sous le nom « rel-<parent>-<type> » au moment de la publication.
+//
+// UN NIVEAU PEUT AVOIR PLUSIEURS ENTREES POUR LA MEME VIGNETTE : chaque tentative de
+// televersement en alloue une, et celles qui n'ont jamais abouti restent au catalogue
+// sans fichier (mesure 2026-10-05 : niveau 6257, vignette d'un ecran en 6262, prete, et
+// 6264, jamais terminee). Nous prenions la PREMIERE rencontree dans une carte Go, donc au
+// hasard : la console recevait parfois l'adresse d'un fichier inexistant et la vignette
+// restait vide. On prend la plus recente qui soit PRETE, et a defaut la plus recente.
 func miniatureDe(parent uint64, relType uint8) (uint64, uint32) {
 	cible := fmt.Sprintf("rel-%d-%d", parent, relType)
 	courses.mu.Lock()
 	defer courses.mu.Unlock()
+	var choisi uint64
+	var taille uint32
+	pret := false
 	for id, m := range courses.byID {
-		if m.Name == cible {
-			return id, m.Size
+		if m.Name != cible {
+			continue
+		}
+		meilleur := choisi == 0 ||
+			(m.Ready && !pret) ||
+			(m.Ready == pret && id > choisi)
+		if meilleur {
+			choisi, taille, pret = id, m.Size, m.Ready
 		}
 	}
-	return 0, 0
+	return choisi, taille
 }
 
 // smm2GetCourses (70) : « donne-moi la fiche de ces niveaux ».
