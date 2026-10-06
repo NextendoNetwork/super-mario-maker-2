@@ -3,7 +3,7 @@ package main
 import "testing"
 
 func TestFreshPlayerMultiplayerStatsMatchCapturedNintendoValues(t *testing.T) {
-	got := statsMultijoueurDe(1800001206)
+	got := statsMultijoueurDe(1800000001)
 	if len(got) != 15 {
 		t.Fatalf("Nintendo returns 15 keys for a fresh player; got %d", len(got))
 	}
