@@ -46,6 +46,20 @@ func pidJoueur(id uint64) uint64 {
 	return id
 }
 
+// nsaDePID returns an NSA identity only when the account service has already
+// verified its ownership during login or a friend lookup. Emulator accounts
+// have no NSA identity and keep their NEX PID.
+func nsaDePID(pid uint64) uint64 {
+	nsaCacheMu.Lock()
+	defer nsaCacheMu.Unlock()
+	for nsa, accountPID := range nsaCache {
+		if accountPID == pid {
+			return nsa
+		}
+	}
+	return pid
+}
+
 // pidsJoueurs traduit une liste, sans la reordonner : l'appelant rend un resultat par
 // identifiant DEMANDE, dans l'ordre, et melanger desynchroniserait la lecture du client.
 func pidsJoueurs(ids []uint64) []uint64 {
