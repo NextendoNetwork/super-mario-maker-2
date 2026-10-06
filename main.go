@@ -133,6 +133,9 @@ func main() {
 	// Recadrer les sessions trouvees selon les options de resultat, comme mesure chez
 	// Nintendo pour les salles d'amis. Propre a SMM2 : desactive par defaut dans nextendo-nex.
 	mm.FindByParticipantHonorOptions = true
+	// La salle d'un ami revient sous l'identifiant de la liste d'amis (souvent le NSA),
+	// celui que la console reconnait ; sans cela elle ne rejoint jamais.
+	mm.FindByParticipantEchoRequestedID = true
 	// Nintendo sends the host's Participate notification after CreateSession's
 	// response (measured about 60 ms later). The immediate push arrives before
 	// SMM2 has installed the new room locally and leaves the host invisible.
