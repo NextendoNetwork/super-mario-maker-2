@@ -130,7 +130,6 @@ func main() {
 	// c'est bien la voie de jonction.
 	mm.FindByParticipantEnabled = drapeauFichier("/data/smm2_mm.on", true)
 	mm.FindByParticipantIDResolver = pidJoueur
-	mm.FriendSessionPIDForClient = nsaDePID
 	// Nintendo sends the host's Participate notification after CreateSession's
 	// response (measured about 60 ms later). The immediate push arrives before
 	// SMM2 has installed the new room locally and leaves the host invisible.
