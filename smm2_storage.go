@@ -341,6 +341,9 @@ func startStorageServer() {
 	// En tache de fond : le dechiffrement des niveaux deja publies ne doit pas retarder
 	// l'ouverture des ports, sinon personne ne peut se connecter pendant ce temps.
 	go courses.lireEntetesManquants()
+	if identites.chercher != nil {
+		go prechargerIdentites(courses.proprietaires())
+	}
 
 	// On fournit a la bibliotheque le comptage des niveaux publies : c'est lui qui
 	// alimente l'ecran « niveaux publies » du joueur (UserInfo.unk9).

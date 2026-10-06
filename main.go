@@ -109,6 +109,13 @@ func main() {
 	secureEndpoint := nex.NewEndpoint(secureSettings)
 	secureEndpoint.SetSecureAccount(securePassword, securePID)
 
+	// La console doit voir son NSA comme PID, comme chez Nintendo : voir
+	// smm2_identite_publique.go. Les deux serveurs, parce que la reponse d'Auth et le
+	// CONNECT du serveur securise doivent parler la meme identite.
+	installerIdentitePublique(settings, secureSettings)
+	// Le drapeau : le pays choisi sur le site plutot que le « FR » de la fiche Nintendo.
+	installerPays()
+
 	mm := nex.NewMatchmaking()
 
 	// ESSAI DU 2026-08-24 : repondre reellement a FindMatchmakeSessionByParticipant

@@ -264,7 +264,7 @@ func ecrireCommentInfo(out *nex.StreamOut, c commentaire, i int) {
 	f.String(identifiantCommentaire(c, i))
 	f.U8(unk3)
 	f.U8(unk4)
-	f.U64(c.PID)
+	f.U64(s.Publique(c.PID)) // U64 brut : traduit a la main, PID() le ferait seul
 	f.U16(c.X)
 	f.U16(c.Y)
 	f.U8(0)       // unk8
