@@ -54,6 +54,19 @@ type rmcEvent struct {
 	Method uint32
 }
 
+// ghostIdle : au-delà de cette inactivité RMC, une connexion PRUDP encore ouverte (le client
+// continue d'envoyer des PING) est considérée FANTÔME et n'est plus comptée « en ligne » par
+// le monitoring. Sans ce seuil, un émulateur/une console laissé ouvert pingue pendant des
+// jours et s'affichait « en ligne depuis 100 h ». Même notion de fantôme que la garde « un
+// seul endroit » côté compte (env NEXTENDO_GHOST_IDLE_SECONDS, défaut 15 min). Porté depuis
+// mk8/s2/ssbu/strikers le 21/09 : ce jeu avait le tracking playerMeta mais pas le filtre.
+func ghostIdle() time.Duration {
+	if n, err := strconv.Atoi(envOr("NEXTENDO_GHOST_IDLE_SECONDS", "")); err == nil && n > 0 {
+		return time.Duration(n) * time.Second
+	}
+	return 15 * time.Minute
+}
+
 // noteRMC records an RMC call (fed from endpoint.OnRMC): updates the player, the
 // global counters, the per-method totals and the live event ring.
 func noteRMC(c *nex.Connection, req *nex.RMCMessage) {
@@ -64,13 +77,19 @@ func noteRMC(c *nex.Connection, req *nex.RMCMessage) {
 	atomic.AddInt64(&rmcTotal, 1)
 
 	metaMu.Lock()
+	now := time.Now()
 	pi := playerMeta[pid]
 	if pi == nil {
-		pi = &playerInfo{PID: pid, FirstSeen: time.Now()}
+		pi = &playerInfo{PID: pid, FirstSeen: now}
 		playerMeta[pid] = pi
 		sessionsSeen++
+	} else if !pi.LastSeen.IsZero() && now.Sub(pi.LastSeen) > ghostIdle() {
+		// Le joueur était dormant (aucune action RMC depuis > seuil fantôme) : on repart sur
+		// une NOUVELLE session en ligne. Sans ça, « en ligne depuis » comptait depuis le tout
+		// premier paquet du process (des jours), d'où des « en ligne depuis 100 h » aberrants.
+		pi.FirstSeen = now
 	}
-	pi.LastSeen = time.Now()
+	pi.LastSeen = now
 	pi.Calls++
 	pi.LastProto = req.Protocol
 	pi.LastMethod = req.Method
@@ -286,8 +305,15 @@ func buildStats(endpoint *nex.Endpoint, mm *nex.Matchmaking) apiStats {
 		if pid == 0 || seen[pid] {
 			continue
 		}
-		seen[pid] = true
 		s := snap[pid]
+		// Fantôme : la connexion PRUDP est encore ouverte (le client envoie des PING) mais le
+		// joueur n'a fait AUCUNE action RMC depuis > seuil. Ce sont des émulateurs/consoles
+		// laissés ouverts qui pinguent pendant des jours ; les compter « en ligne » affichait
+		// des « en ligne depuis 100 h » et gonflait le compteur. On les exclut du monitoring.
+		if s.last.IsZero() || time.Since(s.last) > ghostIdle() {
+			continue
+		}
+		seen[pid] = true
 		online, idle, last := 0, 0, ""
 		if !s.first.IsZero() {
 			online = int(time.Since(s.first).Seconds())
