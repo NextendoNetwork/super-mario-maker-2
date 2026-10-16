@@ -274,6 +274,11 @@ func smm2PostRatingInfo(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessa
 		notes.avancer(dataID, conn.PID, 2)
 	}
 	aime, bouh, _ := notes.compte(dataID)
+	if note == noteAime {
+		if m := courses.get(dataID); m != nil && m.OwnerPID != 0 && m.OwnerPID != conn.PID {
+			notifications.notifierAime(m.OwnerPID, conn.PID, dataID, m.Name)
+		}
+	}
 	fmt.Printf("[SMM2 Notes] post_rating_info(104) pid=%d niveau=%d note=%d (%d, %v) -> %d coeur(s), %d bouh\n",
 		conn.PID, dataID, note, b, c, aime, bouh)
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
