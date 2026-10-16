@@ -214,6 +214,9 @@ func smm2FollowUser(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
 	oui := req.Method == 123
 	if createur != 0 && createur != conn.PID {
 		suivis.suivre(conn.PID, createur, oui)
+		if oui {
+			notifications.notifierSuivi(createur, conn.PID)
+		}
 	}
 	fmt.Printf("[SMM2 Profil] follow(%d) pid=%d createur=%d suivre=%v\n", req.Method, conn.PID, createur, oui)
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
