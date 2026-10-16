@@ -213,6 +213,9 @@ func smm2PostCommentText(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMess
 		DataID: dataID, PID: conn.PID, Texte: texte, Quand: nowUnix(),
 		X: champs.X, Y: champs.Y, SousMonde: champs.SousMonde,
 	})
+	if m := courses.get(dataID); m != nil && m.OwnerPID != 0 && m.OwnerPID != conn.PID {
+		notifications.notifierCommentaire(m.OwnerPID, conn.PID, dataID, m.Name, texte)
+	}
 
 	fmt.Printf("[SMM2 Commentaires] post_comment_text(91) pid=%d data_id=%d texte=%q position=(%d,%d) lisible=%v -> %d sur ce niveau\n",
 		conn.PID, dataID, texte, champs.X, champs.Y, ok, n)
@@ -558,6 +561,9 @@ func smm2PostCommentStamp(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMes
 		DataID: champs.DataID, PID: conn.PID, Quand: nowUnix(),
 		Tampon: tampon, X: champs.X, Y: champs.Y, SousMonde: champs.SousMonde,
 	})
+	if m := courses.get(champs.DataID); m != nil && m.OwnerPID != 0 && m.OwnerPID != conn.PID {
+		notifications.notifierCommentaire(m.OwnerPID, conn.PID, champs.DataID, m.Name, "")
+	}
 
 	fmt.Printf("[SMM2 Commentaires] post_comment_stamp(92) pid=%d data_id=%d tampon=%d position=(%d,%d) sous_monde=%v lisible=%v -> %d sur ce niveau\n",
 		conn.PID, champs.DataID, tampon, champs.X, champs.Y, champs.SousMonde, ok, n)
