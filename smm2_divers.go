@@ -99,19 +99,11 @@ func smm2GetMiiClothes(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessag
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
 }
 
-// smm2GetNotifications (125 GetNewNotification, 129 GetNgCourseNotification).
-//
-// Ni l'une ni l'autre n'est documentee. Leur nom dit « notification » et le repli en
-// liste vide fonctionnait deja — le jeu tourne avec depuis le debut. On garde donc la
-// liste vide, mais en la posant volontairement plutot qu'en la laissant tomber d'un
-// repli generique, et en le journalisant. C'est aussi la verite du moment : Nextendo
-// n'a pas de systeme de notifications, ni de moderation de niveaux.
+// smm2GetNotifications : ancien repli pour 125 et 129.
+// Le systeme complet de notifications (30, 125, 126, 127, 128, 129, 130) a ete
+// retro-ingenierie depuis le binaire Nintendo Switch et implemente dans smm2_notifications.go.
 func smm2GetNotifications(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
-	s := conn.Settings
-	out := nex.NewStreamOut(s)
-	listeVide(out)
-	fmt.Printf("[SMM2 Divers] notifications(%d) pid=%d -> 0 (non documente, liste vide assumee)\n", req.Method, conn.PID)
-	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
+	return smm2GetNewNotification(conn, req)
 }
 
 // smm2GetEndlessModeStatus (108) : la configuration et l'etat des quatre difficultes.
