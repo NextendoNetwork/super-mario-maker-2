@@ -268,6 +268,21 @@ func smm2PostPlayResult(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessa
 		notes.avancer(dataID, conn.PID, 2)
 	}
 
+	// Notification de l'activite au createur du niveau.
+	if m := courses.get(dataID); m != nil && m.OwnerPID != 0 && m.OwnerPID != conn.PID {
+		if termine {
+			if r.Reussites == 1 {
+				notifications.notifierPremierSucces(m.OwnerPID, conn.PID, dataID, m.Name)
+			} else if r.RecordPID == conn.PID && r.RecordMs == ms {
+				notifications.notifierRecord(m.OwnerPID, conn.PID, dataID, m.Name, ms)
+			} else {
+				notifications.notifierNiveauReussi(m.OwnerPID, conn.PID, dataID, m.Name)
+			}
+		} else {
+			notifications.notifierNiveauJoue(m.OwnerPID, conn.PID, dataID, m.Name)
+		}
+	}
+
 	// La marque de mort de l'essai : une structure de 13 octets apres le temps, nulle
 	// quand le niveau est reussi (mesure, voir smm2_notes.go).
 	if !termine {
