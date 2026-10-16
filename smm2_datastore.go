@@ -154,10 +154,22 @@ func smm2DataStoreHandler() nex.RMCHandler {
 			return smm2UpdateCourseTag(conn, req)
 		case 82:
 			return smm2SearchCoursesFolloweePostedBy(conn, req)
+		case 30:
+			return smm2ReceiveNewArrivedNotifications(conn, req)
 		case 108:
 			return smm2GetEndlessModeStatus(conn, req)
-		case 125, 129:
-			return smm2GetNotifications(conn, req)
+		case 125:
+			return smm2GetNewNotification(conn, req)
+		case 126:
+			return smm2UpdateNotificationReadStatus(conn, req)
+		case 127:
+			return smm2GetNotificationList(conn, req)
+		case 128:
+			return smm2UpdateNotificationSettings(conn, req)
+		case 129:
+			return smm2GetNgCourseNotification(conn, req)
+		case 130:
+			return smm2GetNotificationDetails(conn, req)
 		case 154:
 			return smm2GetEventCourseStatus(conn, req)
 		case 96:
