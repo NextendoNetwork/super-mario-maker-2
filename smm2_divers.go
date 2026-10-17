@@ -252,21 +252,6 @@ func smm2UpdateCourseTag(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMess
 	return succesVide(conn, req)
 }
 
-// smm2SearchUsersBattleMode (52) : le classement du mode versus.
-//
-// Meme reponse que la 57 — List<UserInfo>, List<Uint32>, Bool — d'apres la
-// documentation PretendoNetwork. C'est elle qui manquait a l'ecran Classements : 57 et
-// 58 repondaient deja, 52 tombait sur le repli, et le client rejetait l'ecran entier.
-func smm2SearchUsersBattleMode(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
-	s := conn.Settings
-	out := nex.NewStreamOut(s)
-	listeVide(out) // utilisateurs
-	listeVide(out) // Uint32 associes
-	out.Bool(false)
-	fmt.Printf("[SMM2 Divers] search_users_battle_mode(52) pid=%d -> 0\n", conn.PID)
-	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
-}
-
 // smm2GetEndlessModePlayInfo (115) : l'etat des parties de Mario sans fin.
 //
 // STRUCTURE EXACTE, plus une supposition. Elle vient du serveur d'Open Course World —
