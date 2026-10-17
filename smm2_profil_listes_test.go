@@ -86,3 +86,46 @@ func TestOngletsDuProfilEtAbonnements(t *testing.T) {
 		t.Fatalf("82 apres desabonnement : %d, attendu 0", n)
 	}
 }
+
+// TestFollowingFlagOnlyWhenFollowed verifie que le drapeau Following (unk3 dans UserInfo)
+// ne vaut true que si le demandeur suit reellement le createur, et false pour tous les autres.
+func TestFollowingFlagOnlyWhenFollowed(t *testing.T) {
+	defer isolerNotes(t)()
+	s := nex.NewSwitchSettings(accessKey, nexVersion)
+	nex.SMM2EstSuiviFn = suivis.estAbonne
+
+	// Demandeur: PID 7. Createurs: PID 51 et PID 52
+	suivis.suivre(7, 51, true)
+	// Ne suit PAS 52
+
+	lireFollowing := func(demandeur, createur uint64) bool {
+		out := nex.NewStreamOut(s)
+		nex.EcrireUserInfo(out, nex.SMM2Profil{PID: createur, Nom: "C", Pays: "US", Demandeur: demandeur})
+		in := nex.NewStreamIn(out.Bytes(), s)
+		_ = in.U8()
+		sub := in.Substream()
+		_ = sub.PID()
+		_ = sub.String()
+		_ = sub.String()
+		_ = sub.U8()
+		_ = sub.Substream()
+		_ = sub.QBuffer()
+		_ = sub.String()
+		_ = sub.U8()
+		_ = sub.DateTime()
+		return sub.Bool() // unk3: Following !
+	}
+
+	if !lireFollowing(7, 51) {
+		t.Fatalf("demandeur 7 devrait suivre 51 (following=true)")
+	}
+	if lireFollowing(7, 52) {
+		t.Fatalf("demandeur 7 ne devrait PAS suivre 52 (following=false)")
+	}
+	if lireFollowing(7, 7) {
+		t.Fatalf("demandeur ne peut pas se suivre lui-meme (following=false)")
+	}
+	if lireFollowing(0, 51) {
+		t.Fatalf("demandeur inconnu (0) ne doit suivre personne (following=false)")
+	}
+}
