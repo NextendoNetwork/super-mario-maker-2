@@ -378,8 +378,9 @@ func startStorageServer() {
 	nex.SMM2SuperMondeIDFn = SMM2SuperMondeIDDe
 	// La traduction NSA -> PID, pour que la bibliotheque puisse la faire aussi.
 	nex.SMM2PIDJoueurFn = pidJoueur
-	nex.SMM2MasqueBooleensFn = func() uint32 { return uint32(formeEssai(9998, 7)) }
+	nex.SMM2MasqueBooleensFn = func() uint32 { return uint32(formeEssai(9998, 0)) }
 	nex.SMM2EstOfficielFn = officiels.estOfficiel
+	nex.SMM2EstSuiviFn = suivis.estAbonne
 	mux := http.NewServeMux()
 	mux.HandleFunc("/object/", objectHandler)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
