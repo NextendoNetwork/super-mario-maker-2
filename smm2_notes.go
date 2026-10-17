@@ -340,6 +340,7 @@ func smm2PostRatingInfo(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessa
 		return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
 	}
 	notes.noter(dataID, conn.PID, note)
+	resultats.toucher(conn.PID)
 	// Le premier Uint8 apres la note vaut 1 quand la 104 suit une reussite (mesure : la
 	// 104 automatique de fin de niveau porte 0, 1, vrai).
 	if b == 1 {
