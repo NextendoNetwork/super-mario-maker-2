@@ -103,12 +103,7 @@ func repondreNiveaux(conn *nex.Connection, req *nex.RMCMessage, nom string, avec
 
 	liste := trancher(niveauxPublics(), depart, nombre)
 
-	// Meme garde que pour les methodes 70 et 74 : sans SMM2_COURSEINFO=1, on ne sert
-	// aucune fiche. Ecrire une CourseInfo mal formee ne casse pas que la liste — le
-	// client rejette la reponse entiere, et l'ecran affiche une erreur de connexion la
-	// ou une liste vide n'aurait rien casse. L'interrupteur existe parce que c'est
-	// exactement ce qui est arrive la premiere fois.
-	if os.Getenv("SMM2_COURSEINFO") != "1" {
+	if !courseInfoActive() {
 		liste = nil
 	}
 
@@ -118,9 +113,7 @@ func repondreNiveaux(conn *nex.Connection, req *nex.RMCMessage, nom string, avec
 		ecrireCourseInfo(out, m, options, conn.PID)
 	}
 	if avecRangs {
-		// Un rang par niveau, dans l'ordre rendu. On ne classe pas encore : le rang est
-		// la position dans la liste, ce qui est honnete pour « Nouveautes » et
-		// approximatif pour « Populaires ».
+		// Un rang par niveau, dans l'ordre rendu.
 		out.U32(uint32(len(liste)))
 		for i := range liste {
 			out.U32(uint32(i + 1))
@@ -133,14 +126,63 @@ func repondreNiveaux(conn *nex.Connection, req *nex.RMCMessage, nom string, avec
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
 }
 
+// scorePopulariteNiveau calcule le score de popularite d'un niveau pour l'onglet Populaires.
+func scorePopulariteNiveau(c *courseMeta) int64 {
+	aime, bouh, _ := notes.compte(c.DataID)
+	r := resultats.lire(c.DataID)
+	joueurs := uint32(len(notes.Progres[c.DataID]))
+	if joueurs == 0 && r.Parties > 0 {
+		joueurs = r.Parties
+	}
+	return int64(aime)*1000 + int64(joueurs)*50 + int64(r.Parties)*10 + int64(r.Reussites)*20 - int64(bouh)*200
+}
+
+// niveauxPopulaires rend les niveaux ordonnes par popularite decroissante.
+func niveauxPopulaires() []*courseMeta {
+	liste := append([]*courseMeta(nil), niveauxPublics()...)
+	sort.Slice(liste, func(i, j int) bool {
+		sI := scorePopulariteNiveau(liste[i])
+		sJ := scorePopulariteNiveau(liste[j])
+		if sI != sJ {
+			return sI > sJ
+		}
+		if liste[i].CreatedAt != liste[j].CreatedAt {
+			return liste[i].CreatedAt > liste[j].CreatedAt
+		}
+		return liste[i].DataID > liste[j].DataID
+	})
+	return liste
+}
+
 // (73) SearchCoursesLatest — l'onglet « Nouveautes ».
 func smm2SearchCoursesLatest(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
 	return repondreNiveaux(conn, req, "search_courses_latest", false)
 }
 
-// (83) SearchCoursesTermsRanking et (58) — les onglets classes.
+// (83) SearchCoursesTermsRanking — l'onglet « Populaires ».
 func smm2SearchCoursesRanking(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
-	return repondreNiveaux(conn, req, "search_courses_ranking", true)
+	s := conn.Settings
+	options, depart, nombre := parametreRecherche(s, req.Body)
+
+	liste := trancher(niveauxPopulaires(), depart, nombre)
+	if !courseInfoActive() {
+		liste = nil
+	}
+
+	out := nex.NewStreamOut(s)
+	out.U32(uint32(len(liste)))
+	for _, m := range liste {
+		ecrireCourseInfo(out, m, options, conn.PID)
+	}
+	out.U32(uint32(len(liste)))
+	for i := range liste {
+		out.U32(depart + uint32(i+1))
+	}
+	out.Bool(int(depart)+len(liste) < len(niveauxPublics()))
+
+	fmt.Printf("[SMM2 Courses] search_courses_ranking(83) pid=%d options=0x%x depart=%d nombre=%d -> %d niveau(x) populaires\n",
+		conn.PID, options, depart, nombre, len(liste))
+	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, out.Bytes())
 }
 
 // (84) SearchCoursesPickUp — « A la une ». Liste seule, sans rangs ni booleen final.
@@ -165,7 +207,7 @@ func smm2SearchCoursesPickUp(conn *nex.Connection, req *nex.RMCMessage) *nex.RMC
 		nombre = 100
 	}
 	liste := trancher(niveauxPublics(), 0, nombre)
-	if os.Getenv("SMM2_COURSEINFO") != "1" {
+	if !courseInfoActive() {
 		liste = nil
 	}
 	out := nex.NewStreamOut(s)
@@ -233,7 +275,7 @@ func smm2SearchCoursesEndlessMode(conn *nex.Connection, req *nex.RMCMessage) *ne
 	SondeAcceptee(79, 109)
 
 	liste := niveauxEndless(niveauxPublics(), difficulte, nombre)
-	if os.Getenv("SMM2_COURSEINFO") != "1" {
+	if !courseInfoActive() {
 		liste = nil
 	}
 
