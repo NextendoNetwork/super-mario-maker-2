@@ -124,3 +124,104 @@ func TestCommentaireDessineRattacheLeDessin(t *testing.T) {
 	}
 	_ = strings.TrimSpace
 }
+
+// TestCommentaireDessineRepliStateless verifie que la methode 90 sait sauver le dessin
+// meme si la memoire temporaire (dessinsEnAttente) a ete perdue, en lisant la structure
+// embarquee CompletePostCommentPictureParam.
+func TestCommentaireDessineRepliStateless(t *testing.T) {
+	defer isolerCommentaires(t)()
+	s := nex.NewSwitchSettings(accessKey, nexVersion)
+	conn := &nex.Connection{Settings: s, PID: 2}
+
+	// Simule un objet alloue
+	dessinID := courses.alloc(2, "rel-12345-10", 10, nil, nil, 600)
+	os.WriteFile(blobPath(dessinID), make([]byte, 600), 0o644)
+
+	// Parametre Method 88: DataID=12345, X=100, Y=200, taille=600
+	p88 := nex.NewStreamOut(s)
+	// Structure 1
+	sub1 := nex.NewStreamOut(s)
+	sub1.U64(12345)
+	sub1.U8(0)
+	sub1.U16(100)
+	sub1.U16(200)
+	sub1.Bool(false)
+	sub1.U8(1)
+	sub1.U16(0)
+	sub1.Bool(false)
+	sub1.U32(0)
+	p88.Write(frameStruct(s, 0, sub1.Bytes()))
+
+	// Structure 2
+	sub2 := nex.NewStreamOut(s)
+	sub2.U32(600)
+	sub2.U32(64)
+	sub2.U32(0)
+	p88.Write(frameStruct(s, 0, sub2.Bytes()))
+
+	// Requete Method 90 : Clef, Signalement, puis p88
+	reqBody := nex.NewStreamOut(s)
+	reqBody.String(fmt.Sprintf("%d", dessinID))
+	reqBody.String("report-thumb")
+	reqBody.Write(p88.Bytes())
+
+	// S'assurer que dessinsEnAttente est VIDE
+	dessinsEnAttente.Delete(dessinID)
+
+	r90 := smm2CompletePostObjectCommentPicture(conn, &nex.RMCMessage{
+		Settings: s, Mode: nex.RMCRequest, Protocol: 0x73, Method: 90, CallID: 10,
+		Body: frameStruct(s, 0, reqBody.Bytes()),
+	})
+	if r90.IsError {
+		t.Fatalf("90 sans cache a echoue: %+v", r90)
+	}
+
+	comms := commentaires.parNiv[12345]
+	if len(comms) != 1 {
+		t.Fatalf("commentaire non ajoute, compte=%d", len(comms))
+	}
+	if comms[0].Image != dessinID || comms[0].X != 100 || comms[0].Y != 200 {
+		t.Fatalf("commentaire mal reconstitue: %+v", comms[0])
+	}
+}
+
+// TestCommentaireDessineNotification verifie que poser un commentaire dessine declenche
+// bien une notification au proprietaire du niveau.
+func TestCommentaireDessineNotification(t *testing.T) {
+	defer isolerCommentaires(t)()
+	s := nex.NewSwitchSettings(accessKey, nexVersion)
+	conn := &nex.Connection{Settings: s, PID: 42}
+
+	// Creer un niveau appartenant a PID 99
+	courses.byID[777] = &courseMeta{DataID: 777, OwnerPID: 99, Name: "Niveau Test"}
+	notifications.mu.Lock()
+	notifications.Notifs[99] = nil
+	notifications.mu.Unlock()
+
+	dessinID := courses.alloc(42, "rel-777-10", 10, nil, nil, 300)
+	dessinsEnAttente.Store(dessinID, dessinEnAttente{
+		Niveau: 777, PID: 42, Taille: 300, X: 50, Y: 60,
+	})
+
+	reqBody := nex.NewStreamOut(s)
+	reqBody.String(fmt.Sprintf("%d", dessinID))
+	reqBody.String("report")
+
+	r90 := smm2CompletePostObjectCommentPicture(conn, &nex.RMCMessage{
+		Settings: s, Mode: nex.RMCRequest, Protocol: 0x73, Method: 90, CallID: 11,
+		Body: frameStruct(s, 0, reqBody.Bytes()),
+	})
+	if r90.IsError {
+		t.Fatalf("90 a echoue: %+v", r90)
+	}
+
+	notifications.mu.RLock()
+	notifs := notifications.Notifs[99]
+	notifications.mu.RUnlock()
+	if len(notifs) != 1 {
+		t.Fatalf("attendu 1 notification pour PID 99, obtenu %d", len(notifs))
+	}
+	if notifs[0].Type != notifTypeCommentaire || notifs[0].CourseID != 777 || notifs[0].SenderPID != 42 {
+		t.Fatalf("notification incorrecte: %+v", notifs[0])
+	}
+}
