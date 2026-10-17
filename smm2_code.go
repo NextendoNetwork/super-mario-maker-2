@@ -114,6 +114,7 @@ func smm2GetUserOrCourse(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMess
 	mode := formeEssai(131, 0)
 	out := nex.NewStreamOut(s)
 	if mode == 1 {
+		profil.Demandeur = conn.PID
 		nex.EcrireUserInfo(out, profil)
 	} else {
 		nex.EcrireUserInfo(out, nex.SMM2Profil{})
