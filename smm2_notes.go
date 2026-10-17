@@ -57,10 +57,17 @@ type magasinNotes struct {
 	// Progres : niveau -> joueur -> 2 joue, 3 reussi. Pour que la fiche d'un niveau dise
 	// a CE joueur ou il en est, comme chez Nintendo (premier des quatre octets).
 	Progres map[uint64]map[uint64]uint8 `json:"progres,omitempty"`
+	// Dates : niveau -> joueur -> instant Unix de la note, pour les points hebdomadaires
+	Dates map[uint64]map[uint64]int64 `json:"dates,omitempty"`
 	chemin  string
 }
 
-var notes = &magasinNotes{Notes: map[uint64]map[uint64]uint8{}, Donnees: map[uint64]uint32{}, Morts: map[uint64][]marqueMort{}}
+var notes = &magasinNotes{
+	Notes:   map[uint64]map[uint64]uint8{},
+	Donnees: map[uint64]uint32{},
+	Morts:   map[uint64][]marqueMort{},
+	Dates:   map[uint64]map[uint64]int64{},
+}
 
 func (m *magasinNotes) charger(dir string) {
 	m.mu.Lock()
@@ -80,6 +87,9 @@ func (m *magasinNotes) charger(dir string) {
 			}
 			if c.Progres != nil {
 				m.Progres = c.Progres
+			}
+			if c.Dates != nil {
+				m.Dates = c.Dates
 			}
 		}
 	}
@@ -109,6 +119,14 @@ func (m *magasinNotes) noter(dataID, pid uint64, note uint8) {
 		parPID = map[uint64]uint8{}
 		m.Notes[dataID] = parPID
 	}
+	if m.Dates == nil {
+		m.Dates = map[uint64]map[uint64]int64{}
+	}
+	parPIDDates := m.Dates[dataID]
+	if parPIDDates == nil {
+		parPIDDates = map[uint64]int64{}
+		m.Dates[dataID] = parPIDDates
+	}
 	ancienne, existe := parPID[pid]
 	if note == noteAucune && existe {
 		return
@@ -117,6 +135,7 @@ func (m *magasinNotes) noter(dataID, pid uint64, note uint8) {
 		m.Donnees[pid]++
 	}
 	parPID[pid] = note
+	parPIDDates[pid] = nowUnix()
 	m.ecrireLocked()
 }
 
@@ -182,6 +201,61 @@ func (m *magasinNotes) compte(dataID uint64) (aime, bouh, sans uint32) {
 		}
 	}
 	return
+}
+
+// statsCreateur calcule pour un createur :
+// - son total de coeurs ("J'aime") recus sur ses niveaux (cle 0 de maker_stats)
+// - ses points de createur totaux (Maker Points, cle 1 de maker_stats)
+// - ses points de createur de la semaine (Weekly Maker Points, cle 0 de unk7)
+func (m *magasinNotes) statsCreateur(pid uint64) (likes, points, pointsSemaine uint32) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	courses.mu.RLock()
+	defer courses.mu.RUnlock()
+
+	maintenant := nowUnix()
+	semaineDerniere := maintenant - 7*86400
+
+	var totalLikes uint32
+	var totalParties uint32
+	var totalSemaine uint32
+
+	for _, c := range courses.byID {
+		if c.OwnerPID != pid || !c.Ready || estFichierRattache(c.Name) {
+			continue
+		}
+
+		var courseLikes uint32
+		var weeklyLikes uint32
+
+		for jPID, note := range m.Notes[c.DataID] {
+			if note == noteAime {
+				courseLikes++
+				var quand int64
+				if m.Dates != nil && m.Dates[c.DataID] != nil {
+					quand = m.Dates[c.DataID][jPID]
+				}
+				if quand >= semaineDerniere || (quand == 0 && c.CreatedAt >= semaineDerniere) {
+					weeklyLikes++
+				}
+			}
+		}
+
+		totalLikes += courseLikes
+
+		res := resultats.lire(c.DataID)
+		totalParties += res.Parties
+
+		if c.CreatedAt >= semaineDerniere {
+			totalSemaine += weeklyLikes + res.Parties
+		} else {
+			totalSemaine += weeklyLikes
+		}
+	}
+
+	totalPoints := totalLikes + totalParties
+	return totalLikes, totalPoints, totalSemaine
 }
 
 func (m *magasinNotes) restantes(pid uint64) uint32 {
