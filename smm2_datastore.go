@@ -57,6 +57,7 @@ func smm2DataStoreHandler() nex.RMCHandler {
 		// 60 = CanPostCourse : c'est le verrou de la publication. Sa structure (Bool + Uint32)
 		// vient de la documentation PretendoNetwork, pas d'une supposition.
 		if req.Method == 47 || req.Method == 48 || req.Method == 49 || req.Method == 60 {
+			resultats.toucher(conn.PID)
 			return nex.DataStoreSMM2Handler()(conn, req)
 		}
 		// sync_user_profile(49): the OWN profile — patch pid + pseudo into the template.
@@ -304,33 +305,52 @@ func smm2DataStoreHandler() nex.RMCHandler {
 			return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
 
 		case 119:
-			// DEUX structures { uint32 ; bool }, sans bool de tete. Lu a 0x5e7ad0.
-			//
-			// Jamais vue passer : on la sert quand meme, parce que le repli generique lui
-			// enverrait quatre octets la ou elle en attend vingt, et qu'une reponse fausse
-			// par la forme ne se signale jamais — elle fait juste echouer la suite.
-			// Les valeurs sont celles que le client se donne lui-meme faute de mieux.
-			// LE CORPS DE LA 119 EST CE QU'ON N'A JAMAIS VU.
-			//
-			// D'apres le binaire, EndBattleModeParam porte battleResults, killCount,
-			// killedCount, les trois composantes Glicko-2 et le gid. Ce sont les valeurs que
-			// la CONSOLE a calculees a partir de ce qu'on lui avait servi en 117 : les lire
-			// dit d'un coup si elle a compris nos notes, et lesquelles elle nous rend.
-			//
-			// On l'imprime au lieu d'essayer une valeur de plus. Trois essais a l'aveugle ont
-			// deja coute une partie chacun a des joueurs reels.
-			if n := len(req.Body); n > 0 {
-				max := n
-				if max > 160 {
-					max = 160
-				}
-				fmt.Printf("[SMM2 Courses] versus 0x73.119 pid=%d corps len=%d: %x\n",
-					conn.PID, n, req.Body[:max])
-			}
-			fmt.Printf("[SMM2 Courses] versus 0x73.119 pid=%d -> 2 structures (MESURE)\n",
-				conn.PID)
+			// EndBattleMode : resultat du combat versus, calcule par la console.
+			// D'apres 0x5ebef0 dans le binaire, EndBattleModeParam porte :
+			//   - battleResults : Map<U64, U8> (PID -> rang d'arrivee 1..4)
+			//   - killCount     : U32
+			//   - killedCount   : U32
+			//   - glicko2Rate   : U32
+			//   - glicko2Dev    : U32
+			//   - glicko2Vol    : U32
+			//   - gid           : U32 (salon)
+			in := nex.NewStreamIn(req.Body, s)
+			var rangJoueur uint8 = 2
+			var kills, deaths, rate, dev, vol, gid uint32
 
-			return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, encode119(s))
+			if in.Remaining() > 0 {
+				p := in
+				if s.StructHeader {
+					_ = in.U8() // version de structure
+					p = in.Substream()
+				}
+				numResults := p.U32()
+				for i := uint32(0); i < numResults && p.Remaining() >= 9; i++ {
+					targetPID := p.U64()
+					r := p.U8()
+					if targetPID == conn.PID {
+						rangJoueur = r
+					}
+				}
+				kills = p.U32()
+				deaths = p.U32()
+				rate = p.U32()
+				dev = p.U32()
+				vol = p.U32()
+				gid = p.U32()
+			}
+
+			newRating, tier := versus.enregistrerFinMatch(conn.PID, rangJoueur, kills, deaths, rate, dev, vol)
+			resultats.toucher(conn.PID)
+
+			fmt.Printf("[SMM2 Courses] versus 0x73.119 pid=%d rang=%d gid=%d -> rating=%d tier=%d\n",
+				conn.PID, rangJoueur, gid, newRating, tier)
+
+			respNotes := [2]note117{
+				{newRating, true},
+				{tier, true},
+			}
+			return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, encode119WithNotes(s, respNotes))
 		case 104:
 			// PostRankingInfo : le jeu annonce un resultat de classement. La forme du
 			// parametre — CourseId puis trois Uint8 — correspond aux onze octets mesures.
