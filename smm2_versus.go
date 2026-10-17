@@ -115,13 +115,18 @@ func (m *magasinVersus) multiplayerStats(pid uint64) map[uint8]uint32 {
 	for i := uint8(0); i < 15; i++ {
 		stats[i] = 0
 	}
-	if st.Parties == 0 {
+	if st.Parties == 0 && st.PartiesCoop == 0 {
 		stats[0] = 0
 		stats[1] = 1
 		return stats
 	}
-	stats[0] = st.Rating
-	stats[1] = rangTierDe(st.Rating)
+	if st.Parties > 0 {
+		stats[0] = st.Rating
+		stats[1] = rangTierDe(st.Rating)
+	} else {
+		stats[0] = 0
+		stats[1] = 1
+	}
 	stats[2] = st.Parties
 	stats[3] = st.Victoires
 	stats[4] = st.Streak
@@ -197,4 +202,28 @@ func (m *magasinVersus) enregistrerFinMatch(pid uint64, rang uint8, kills, death
 
 	m.ecrireLocked()
 	return st.Rating, rangTierDe(st.Rating)
+}
+
+// enregistrerFinMatchCoop met a jour les compteurs du mode cooperatif (Multi Clear).
+func (m *magasinVersus) enregistrerFinMatchCoop(pid uint64, reussi bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	st, ok := m.parJoueur[pid]
+	if !ok || st == nil {
+		st = &statsVersusJoueur{Rating: 1000, MaxRating: 1000, GlickoRate: 1500, GlickoDeviation: 350}
+		m.parJoueur[pid] = st
+	}
+
+	st.PartiesCoop++
+	st.DernierePartie = nowUnix()
+
+	if reussi {
+		st.VictoiresCoop++
+		st.StreakCoop++
+	} else {
+		st.StreakCoop = 0
+	}
+
+	m.ecrireLocked()
 }
