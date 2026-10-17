@@ -182,6 +182,7 @@ func smm2GetUsers(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
 	out := nex.NewStreamOut(s)
 	out.U32(uint32(len(pids))) // list<UserInfo>
 	for _, pid := range pids {
+		resultats.toucher(pid)
 		out.Write(patchUserInfo(s, userInfoTemplate, pid, pseudoOr(pid)))
 	}
 	out.U32(uint32(len(pids))) // list<result>
