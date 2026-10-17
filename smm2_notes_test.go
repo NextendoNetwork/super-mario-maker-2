@@ -209,3 +209,47 @@ func TestEtatJoueurDansLaFiche(t *testing.T) {
 		t.Errorf("autre joueur : (%d, %d), attendu (1, 1)", e, n)
 	}
 }
+
+// TestMakerPointsStats verifie le calcul dynamique des points de createur et des coeurs recus.
+func TestMakerPointsStats(t *testing.T) {
+	defer isolerNotes(t)()
+	r := resultats
+	defer func() { resultats = r }()
+
+	// PID 10 possede les cours 100 et 101
+	courses.byID[100] = &courseMeta{DataID: 100, OwnerPID: 10, Name: "Niveau 1", Ready: true, CreatedAt: time.Now().Unix()}
+	courses.byID[101] = &courseMeta{DataID: 101, OwnerPID: 10, Name: "Niveau 2", Ready: true, CreatedAt: time.Now().Unix()}
+
+	// Notes : niveau 100 a 2 coeurs, niveau 101 a 1 coeur et 1 bouh
+	notes.noter(100, 20, noteAime)
+	notes.noter(100, 21, noteAime)
+	notes.noter(101, 22, noteAime)
+	notes.noter(101, 23, noteBouh)
+
+	// Parties : niveau 100 a 15 parties, niveau 101 a 5 parties
+	resultats = &magasinResultats{
+		parNiv: map[uint64]*resultatNiveau{
+			100: {Parties: 15, Reussites: 10},
+			101: {Parties: 5, Reussites: 2},
+		},
+		parJoueur: map[uint64]*statsJoueur{},
+	}
+
+	likes, pts, ptsSem := notes.statsCreateur(10)
+	// totalLikes = 2 (niv 100) + 1 (niv 101) = 3
+	if likes != 3 {
+		t.Fatalf("likes = %d, attendu 3", likes)
+	}
+	// totalPoints = 3 likes + 20 parties = 23
+	if pts != 23 {
+		t.Fatalf("points = %d, attendu 23", pts)
+	}
+	if ptsSem == 0 {
+		t.Fatalf("points semaine = 0, attendu > 0")
+	}
+
+	st := resultats.statsDe(10)
+	if st.LikesRecus != 3 || st.PointsCreateur != 23 {
+		t.Fatalf("statsDe = %+v, attendu LikesRecus=3, PointsCreateur=23", st)
+	}
+}
