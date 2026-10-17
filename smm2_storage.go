@@ -187,6 +187,7 @@ func (c *courseStore) complete(dataID uint64, ok bool) {
 	}
 	if ok {
 		m.Ready = true
+		resultats.toucher(m.OwnerPID)
 	} else {
 		delete(c.byID, dataID)
 	}
@@ -221,6 +222,21 @@ func (c *courseStore) setTags(dataID uint64, tag1, tag2 uint8) {
 		m.Tags = []string{strconv.FormatUint(uint64(tag1), 10), strconv.FormatUint(uint64(tag2), 10)}
 		c.persistLocked()
 	}
+}
+
+// dernierUpload rend l'instant Unix du niveau le plus recent publie par ce joueur.
+func (c *courseStore) dernierUpload(pid uint64) int64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	var maxTime int64
+	for _, m := range c.byID {
+		if m.OwnerPID == pid && m.Ready && !estFichierRattache(m.Name) {
+			if m.CreatedAt > maxTime {
+				maxTime = m.CreatedAt
+			}
+		}
+	}
+	return maxTime
 }
 
 // lireEnteteSi lit l'en-tete d'un niveau et le range dans le catalogue, une seule fois.
