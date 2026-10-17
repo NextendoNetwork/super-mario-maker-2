@@ -136,6 +136,7 @@ func repondreClassement(conn *nex.Connection, req *nex.RMCMessage, nom string, l
 	out.U32(uint32(len(l)))
 	for _, e := range l {
 		p, _ := profilDe(e.pid)
+		p.Demandeur = conn.PID
 		nex.EcrireUserInfo(out, p)
 	}
 	out.U32(uint32(len(rangs)))
