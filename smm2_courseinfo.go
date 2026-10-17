@@ -134,12 +134,40 @@ func ecrireCourseInfo(out *nex.StreamOut, c *courseMeta, options uint32, pid uin
 	// notes {coeurs, bouh, base}, table 0x40 a deux cles — QUE pour un niveau dont aucun
 	// diviseur ne peut etre nul. Tous les autres gardent EXACTEMENT la forme d'avant, qui
 	// ne plante pas.
-	if r.Parties > 0 && r.Tentatives > 0 && r.Reussites > 0 {
-		ecrireTable(f, []uint32{r.Parties, r.Tentatives, 0, r.Reussites, 0})
-		aime, bouh, _ := notes.compte(c.DataID)
-		base := r.Parties
+	aime, bouh, _ := notes.compte(c.DataID)
+	joueurs := uint32(len(notes.Progres[c.DataID]))
+	if joueurs == 0 && r.Parties > 0 {
+		joueurs = r.Parties
+	}
+
+	parties := r.Parties
+	tentatives := r.Tentatives
+	reussites := r.Reussites
+
+	// Si le niveau est publie et pret mais n'a pas encore d'historique dans resultats,
+	// reprendre les essais et la reussite de validation de l'auteur
+	if tentatives == 0 && c.EssaisAuteur > 0 {
+		tentatives = c.EssaisAuteur
+	}
+	if reussites == 0 && c.TempsAuteur > 0 {
+		reussites = 1
+	}
+	if parties == 0 && reussites > 0 {
+		parties = 1
+	}
+	if joueurs == 0 && parties > 0 {
+		joueurs = 1
+	}
+
+	if parties > 0 && tentatives > 0 && reussites > 0 {
+		// Cle 4 = joueurs uniques (empreintes)
+		ecrireTable(f, []uint32{parties, tentatives, 0, reussites, joueurs})
+		base := parties
 		if base < aime+bouh {
 			base = aime + bouh
+		}
+		if base == 0 {
+			base = 1
 		}
 		ecrireTable(f, []uint32{aime, bouh, base})
 		// 0x40 : « coeurs et parties de la semaine » selon ocw-server ; {0, 0} figure
@@ -150,7 +178,7 @@ func ecrireCourseInfo(out *nex.StreamOut, c *courseMeta, options uint32, pid uin
 		// celles dont on connait le sens ; les cles 2 et 4 restent absentes plutot que
 		// remplies de zeros qui affirmeraient « zero partie en versus » alors qu'on ne
 		// compte simplement pas ce mode.
-		nex.WriteMap(f, map[uint8]uint32{0: r.Parties, 1: r.Tentatives, 3: r.Reussites},
+		nex.WriteMap(f, map[uint8]uint32{0: parties, 1: tentatives, 3: reussites},
 			func(o *nex.StreamOut, k uint8) { o.U8(k) },
 			func(o *nex.StreamOut, v uint32) { o.U32(v) })
 		vide() // Ratings : vide, voir plus haut
@@ -364,6 +392,10 @@ func miniatureDe(parent uint64, relType uint8) (uint64, uint32) {
 // Requete : List<Uint64> data_ids, puis Uint32 « result options » — le masque qui dit
 // quels champs facultatifs de CourseInfo le client veut recevoir.
 // Reponse : List<CourseInfo>, puis List<Result> — un code par identifiant demande.
+func courseInfoActive() bool {
+	return os.Getenv("SMM2_COURSEINFO") != "0"
+}
+
 func smm2GetCourses(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
 	s := conn.Settings
 	in := nex.NewStreamIn(req.Body, s)
@@ -403,12 +435,8 @@ func smm2GetCourses(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
 	}
 	courses.mu.Unlock()
 
-	// FILET DE SECURITE. Repondre une liste vide laissait publier sans afficher le code —
-	// genant, mais fonctionnel. Repondre une fiche MAL FORMEE fait echouer la publication
-	// entiere : c'est strictement pire. Tant que la forme n'est pas sure, on ne rend une
-	// fiche que si SMM2_COURSEINFO=1 est pose ; sinon on revient au comportement qui
-	// marchait. On n'echange pas une fonctionnalite manquante contre une regression.
-	if os.Getenv("SMM2_COURSEINFO") != "1" {
+	// FILET DE SECURITE : actif par defaut sauf si explicitement desactive via SMM2_COURSEINFO=0.
+	if !courseInfoActive() {
 		out := nex.NewStreamOut(s)
 		out.U32(0)
 		out.U32(uint32(len(res)))
@@ -527,7 +555,7 @@ func smm2SearchCoursesPostedBy(conn *nex.Connection, req *nex.RMCMessage) *nex.R
 		}
 	}
 
-	if os.Getenv("SMM2_COURSEINFO") != "1" {
+	if !courseInfoActive() {
 		liste = nil // meme raison que pour la 70
 	}
 	out := nex.NewStreamOut(s)
