@@ -53,19 +53,26 @@ func candidatsClassement() map[uint64]bool {
 	return pids
 }
 
-// pointsCreateur : la popularite des niveaux publies de chaque joueur — les parties
-// qu'ils ont suscitees, plus les coeurs recus.
-//
-// Chez Nintendo les points de createur viennent des coeurs. Mais les boutons J'aime ne
-// fonctionnent pas encore chez nous (voir smm2_notes.go) : au 2026-10-05, les 94 notes
-// enregistrees valent toutes « aucune ». Classer par coeurs seuls donnait donc « No
-// makers found » a tout le monde. Les parties jouees par d'autres sont la mesure de
-// popularite qu'on possede vraiment ; les coeurs s'y ajouteront quand ils existeront.
+// pointsCreateur : les Maker Points totaux de chaque joueur.
 func pointsCreateur() map[uint64]uint32 {
 	pts := map[uint64]uint32{}
-	for _, m := range niveauxPublics() {
-		aime, _, _ := notes.compte(m.DataID)
-		pts[m.OwnerPID] += aime + resultats.lire(m.DataID).Parties
+	for pid := range candidatsClassement() {
+		_, p, _ := notes.statsCreateur(pid)
+		if p > 0 {
+			pts[pid] = p
+		}
+	}
+	return pts
+}
+
+// pointsCreateurSemaine : les Maker Points hebdomadaires de chaque joueur.
+func pointsCreateurSemaine() map[uint64]uint32 {
+	pts := map[uint64]uint32{}
+	for pid := range candidatsClassement() {
+		_, _, p := notes.statsCreateur(pid)
+		if p > 0 {
+			pts[pid] = p
+		}
 	}
 	return pts
 }
@@ -186,7 +193,7 @@ func smm2SearchUsersTermsRanking(conn *nex.Connection, req *nex.RMCMessage) *nex
 	p := in.Substream()
 	_ = p.U32()
 	depart, nombre := lirePlage(p)
-	pts := pointsCreateur()
+	pts := pointsCreateurSemaine()
 	l, r, encore := classer(func(pid uint64) uint32 { return pts[pid] }, depart, nombre)
 	return repondreClassement(conn, req, "search_users_terms_ranking(58)", l, r, encore)
 }
