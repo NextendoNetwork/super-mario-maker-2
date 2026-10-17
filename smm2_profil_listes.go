@@ -82,6 +82,15 @@ func (m *magasinSuivis) createurs(abonne uint64) []uint64 {
 	return l
 }
 
+func (m *magasinSuivis) estAbonne(abonne, createur uint64) bool {
+	if abonne == 0 || createur == 0 || abonne == createur {
+		return false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.Suit[abonne] != nil && m.Suit[abonne][createur]
+}
+
 // niveauxOu : les niveaux publics qui satisfont garder, du plus recent au plus ancien.
 func niveauxOu(garder func(m *courseMeta) bool) []*courseMeta {
 	var l []*courseMeta
@@ -200,6 +209,7 @@ func smm2SearchUsersFollowee(conn *nex.Connection, req *nex.RMCMessage) *nex.RMC
 	out.U32(uint32(len(l)))
 	for _, c := range l {
 		prof, _ := profilDe(c)
+		prof.Demandeur = conn.PID
 		nex.EcrireUserInfo(out, prof)
 	}
 	out.Bool(int(depart)+len(l) < len(tous))
