@@ -279,6 +279,10 @@ func (c *courseStore) lireEnteteSi(dataID uint64) {
 	fmt.Printf("[SMM2 BCD] data_id=%d %q -> style=%s theme=%d minuterie=%d essais_auteur=%d temps_auteur=%dms\n",
 		dataID, e.Nom, styles[e.Style], e.Theme, e.Minuterie, e.EssaisAuteur, e.TempsAuteur)
 	c.persistLocked()
+
+	if m.OwnerPID != 0 && m.TempsAuteur > 0 {
+		notes.avancer(dataID, m.OwnerPID, 3)
+	}
 }
 
 // lireEntetesManquants rattrape les niveaux publies avant que cette lecture existe.
