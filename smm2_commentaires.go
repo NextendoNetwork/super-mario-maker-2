@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -401,13 +402,27 @@ func imageDuCommentaire(c commentaire) (uint64, uint32) {
 	attendu := fmt.Sprintf("rel-%d-10", c.DataID)
 	courses.mu.RLock()
 	defer courses.mu.RUnlock()
-	if m := courses.byID[c.Image]; m != nil && m.Name == attendu {
-		return c.Image, c.TailleImg
+
+	imgID := c.Image
+	taille := c.TailleImg
+
+	if m := courses.byID[c.Image]; m != nil {
+		if m.Name == attendu {
+			if taille == 0 {
+				taille = m.Size
+			}
+			return c.Image, taille
+		}
 	}
 	if m := courses.byID[c.Image-1]; m != nil && m.Name == attendu {
 		return c.Image - 1, m.Size
 	}
-	return c.Image, c.TailleImg
+	if taille == 0 {
+		if st, err := os.Stat(blobPath(imgID)); err == nil && st.Size() > 0 {
+			taille = uint32(st.Size())
+		}
+	}
+	return imgID, taille
 }
 
 // smm2PreparePostObjectCommentPicture (88) : le joueur envoie un commentaire DESSINE.
@@ -505,12 +520,46 @@ func smm2CompletePostObjectCommentPicture(conn *nex.Connection, req *nex.RMCMess
 		fmt.Printf("[SMM2 Commentaires] complete_picture(%d) pid=%d : clef illisible %q (%v)\n", req.Method, conn.PID, clef, p.Err())
 		return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
 	}
+
+	var d dessinEnAttente
 	v, ok := dessinsEnAttente.LoadAndDelete(objet)
+	if ok {
+		d = v.(dessinEnAttente)
+	} else if p.Remaining() > 0 {
+		// Repli direct : CompletePostCommentPictureParam (0x5dfbf0) embarque
+		// la structure de la 88 (DataStorePostCommentTextParam + taille) juste apres
+		// les deux clefs. Si le cache en memoire a ete perdu (redemarrage serveur),
+		// on reconstruit l'entree directement depuis le paquet du client.
+		if s.StructHeader {
+			_ = p.U8()
+		}
+		sub := p.Substream()
+		champs, okChamps := lirePosteCommentaire(sub)
+		var tailleParam uint32
+		if p.Remaining() > 0 {
+			if s.StructHeader {
+				_ = p.U8()
+			}
+			q := p.Substream()
+			tailleParam = q.U32()
+		}
+		if okChamps && champs.DataID > 0 {
+			d = dessinEnAttente{
+				Niveau:    champs.DataID,
+				PID:       conn.PID,
+				Taille:    tailleParam,
+				X:         champs.X,
+				Y:         champs.Y,
+				SousMonde: champs.SousMonde,
+			}
+			ok = true
+		}
+	}
+
 	if !ok {
-		fmt.Printf("[SMM2 Commentaires] complete_picture(%d) pid=%d objet=%d : aucune 88 correspondante\n", req.Method, conn.PID, objet)
+		fmt.Printf("[SMM2 Commentaires] complete_picture(%d) pid=%d objet=%d : aucune 88 correspondante ni parametre embarque\n", req.Method, conn.PID, objet)
 		return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
 	}
-	d := v.(dessinEnAttente)
 	if d.PID != conn.PID {
 		fmt.Printf("[SMM2 Commentaires] complete_picture(%d) pid=%d objet=%d appartient a pid=%d — refuse\n", req.Method, conn.PID, objet, d.PID)
 		return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
@@ -520,9 +569,21 @@ func smm2CompletePostObjectCommentPicture(conn *nex.Connection, req *nex.RMCMess
 		taille = uint32(st.Size())
 	}
 	courses.complete(objet, true)
+
+	// Valider aussi la miniature de signalement si elle correspond a un objet alloue
+	if sigID, err := strconv.ParseUint(signalement, 10, 64); err == nil && sigID > 0 {
+		courses.complete(sigID, true)
+	}
+
 	n := commentaires.ajouterDessin(d.Niveau, conn.PID, objet, taille, d.X, d.Y, d.SousMonde)
 	fmt.Printf("[SMM2 Commentaires] complete_picture(%d) pid=%d dessin=%d (%d octets) niveau=%d position=(%d,%d) signalement=%q -> %d commentaire(s)\n",
 		req.Method, conn.PID, objet, taille, d.Niveau, d.X, d.Y, signalement, n)
+
+	// Notifier le createur du niveau
+	if m := courses.get(d.Niveau); m != nil && m.OwnerPID != conn.PID {
+		notifications.notifierCommentaire(m.OwnerPID, conn.PID, d.Niveau, m.Name, "")
+	}
+
 	return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
 }
 
