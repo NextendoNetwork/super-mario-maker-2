@@ -209,6 +209,7 @@ func smm2PostCommentText(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMess
 	champs, ok := lirePosteCommentaire(p)
 	dataID := champs.DataID
 	texte := derniereChaine(req.Body)
+	resultats.toucher(conn.PID)
 
 	n := commentaires.ajouter(commentaire{
 		DataID: dataID, PID: conn.PID, Texte: texte, Quand: nowUnix(),
@@ -576,6 +577,7 @@ func smm2CompletePostObjectCommentPicture(conn *nex.Connection, req *nex.RMCMess
 	}
 
 	n := commentaires.ajouterDessin(d.Niveau, conn.PID, objet, taille, d.X, d.Y, d.SousMonde)
+	resultats.toucher(conn.PID)
 	fmt.Printf("[SMM2 Commentaires] complete_picture(%d) pid=%d dessin=%d (%d octets) niveau=%d position=(%d,%d) signalement=%q -> %d commentaire(s)\n",
 		req.Method, conn.PID, objet, taille, d.Niveau, d.X, d.Y, signalement, n)
 
@@ -622,6 +624,7 @@ func smm2PostCommentStamp(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMes
 		DataID: champs.DataID, PID: conn.PID, Quand: nowUnix(),
 		Tampon: tampon, X: champs.X, Y: champs.Y, SousMonde: champs.SousMonde,
 	})
+	resultats.toucher(conn.PID)
 	if m := courses.get(champs.DataID); m != nil && m.OwnerPID != 0 && m.OwnerPID != conn.PID {
 		notifications.notifierCommentaire(m.OwnerPID, conn.PID, champs.DataID, m.Name, "")
 	}
