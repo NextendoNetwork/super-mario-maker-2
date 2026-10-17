@@ -82,3 +82,33 @@ func TestClassementsDeJoueurs(t *testing.T) {
 		t.Fatal("58 : rangs ou booleen final mal formes")
 	}
 }
+
+// TestUserInfoDerniereActiviteNonEpoque verifie que last_active d'un UserInfo n'est pas
+// l'epoque 1970 ("plus d'un an") mais bien l'activite recente ou l'instant present.
+func TestUserInfoDerniereActiviteNonEpoque(t *testing.T) {
+	defer isolerNotes(t)()
+	s := nex.NewSwitchSettings(accessKey, nexVersion)
+
+	// Simule un joueur avec une derniere activite recente
+	resultats.toucher(123)
+
+	out := nex.NewStreamOut(s)
+	nex.EcrireUserInfo(out, nex.SMM2Profil{PID: 123, Nom: "Testeur", Pays: "US"})
+
+	in := nex.NewStreamIn(out.Bytes(), s)
+	_ = in.U8() // version 3
+	sub := in.Substream()
+	_ = sub.PID()
+	_ = sub.String() // code
+	_ = sub.String() // nom
+	_ = sub.U8()     // unk1 version
+	_ = sub.Substream()
+	_ = sub.QBuffer() // Mii
+	_ = sub.String()  // pays
+	_ = sub.U8()      // region
+	dt := nex.DateTime(sub.DateTime())
+
+	if dt.Year() < 2026 {
+		t.Fatalf("last_active annee=%d, attendu >= 2026 (pas 1970)", dt.Year())
+	}
+}
