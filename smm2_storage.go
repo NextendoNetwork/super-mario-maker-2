@@ -354,6 +354,7 @@ func startStorageServer() {
 	suivis.charger(storageDir)
 	notifications.charger(storageDir)
 	versus.charger(storageDir)
+	officiels.charger(storageDir)
 	// Une seule passe au demarrage pour etablir premieres reussites et records, et pour
 	// rattraper les fichiers ecrits avant que ces compteurs existent.
 	resultats.reconstruireCompteurs()
@@ -374,6 +375,7 @@ func startStorageServer() {
 	// La traduction NSA -> PID, pour que la bibliotheque puisse la faire aussi.
 	nex.SMM2PIDJoueurFn = pidJoueur
 	nex.SMM2MasqueBooleensFn = func() uint32 { return uint32(formeEssai(9998, 7)) }
+	nex.SMM2EstOfficielFn = officiels.estOfficiel
 	mux := http.NewServeMux()
 	mux.HandleFunc("/object/", objectHandler)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
