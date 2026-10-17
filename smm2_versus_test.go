@@ -104,3 +104,45 @@ func TestVersusMatchAndLeaderboard(t *testing.T) {
 		t.Fatalf("52 : attendu 2 joueurs classes (p1 et p2), obtenu %d", numUsers)
 	}
 }
+
+// TestCoopMatchTracking verifie le suivi des parties et victoires en mode cooperatif.
+func TestCoopMatchTracking(t *testing.T) {
+	defer isolerNotes(t)()
+	s := nex.NewSwitchSettings(accessKey, nexVersion)
+
+	p1 := uint64(2001)
+	p2 := uint64(2002)
+
+	// Simuler une fin de match Coop reussi (tous deux arrivent avec statut MultiClear = 3)
+	sub := nex.NewStreamOut(s)
+	sub.U32(2)
+	sub.U64(p1)
+	sub.U8(3) // MultiClear
+	sub.U64(p2)
+	sub.U8(3) // MultiClear
+	sub.U32(0) // kills
+	sub.U32(0) // deaths
+	sub.U32(0)
+	sub.U32(0)
+	sub.U32(0)
+	sub.U32(99) // gid
+
+	conn1 := &nex.Connection{Settings: s, PID: p1}
+	r119 := smm2DataStoreHandler()(conn1, &nex.RMCMessage{
+		Settings: s, Mode: nex.RMCRequest, Protocol: 0x73, Method: 119, CallID: 10,
+		Body: frameStruct(s, 0, sub.Bytes()),
+	})
+	if r119.IsError {
+		t.Fatalf("119 coop a echoue: %+v", r119)
+	}
+
+	st1 := versus.statsDe(p1)
+	if st1.PartiesCoop != 1 || st1.VictoiresCoop != 1 || st1.StreakCoop != 1 {
+		t.Fatalf("stats coop p1 incorrectes: %+v", st1)
+	}
+
+	mpStats := versus.multiplayerStats(p1)
+	if mpStats[10] != 1 || mpStats[11] != 1 || mpStats[12] != 1 {
+		t.Fatalf("multiplayer_stats coop incorrect: %+v", mpStats)
+	}
+}
