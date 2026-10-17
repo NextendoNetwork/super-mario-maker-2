@@ -23,6 +23,7 @@ package main
 import (
 	"bytes"
 	"crypto/md5"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -30,6 +31,7 @@ import (
 	"io"
 	"mime"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -370,9 +372,68 @@ func startStorageServer() {
 		mux.ServeHTTP(w, r)
 	})
 	srv := &http.Server{Addr: fmt.Sprintf(":%d", storagePort), Handler: logged}
-	fmt.Printf("[SMM2 Storage] listening HTTPS :%d (blob store)\n", storagePort)
-	if err := srv.ListenAndServeTLS(certFile, keyFile); err != nil {
+
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		fmt.Printf("[SMM2 Storage] cert load failed: %v, falling back to HTTP\n", err)
+		if err := srv.ListenAndServe(); err != nil {
+			fmt.Printf("[SMM2 Storage] stopped: %v\n", err)
+		}
+		return
+	}
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+	}
+	ln, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", storagePort))
+	if err != nil {
+		fmt.Printf("[SMM2 Storage] listen tcp :%d failed: %v\n", storagePort, err)
+		return
+	}
+	dual := &dualStorageListener{Listener: ln, tlsConfig: tlsConfig}
+	fmt.Printf("[SMM2 Storage] listening HTTPS/HTTP :%d (blob store)\n", storagePort)
+	if err := srv.Serve(dual); err != nil {
 		fmt.Printf("[SMM2 Storage] stopped: %v\n", err)
+	}
+}
+
+type dualStorageListener struct {
+	net.Listener
+	tlsConfig *tls.Config
+}
+
+type storagePeekConn struct {
+	net.Conn
+	reader io.Reader
+}
+
+func (c *storagePeekConn) Read(b []byte) (int, error) {
+	return c.reader.Read(b)
+}
+
+func (l *dualStorageListener) Accept() (net.Conn, error) {
+	for {
+		conn, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+
+		buf := make([]byte, 1)
+		n, err := conn.Read(buf)
+		if err != nil {
+			conn.Close()
+			continue
+		}
+
+		pConn := &storagePeekConn{
+			Conn:   conn,
+			reader: io.MultiReader(bytes.NewReader(buf[:n]), conn),
+		}
+
+		if buf[0] == 0x16 {
+			return tls.Server(pConn, l.tlsConfig), nil
+		}
+
+		return pConn, nil
 	}
 }
 
