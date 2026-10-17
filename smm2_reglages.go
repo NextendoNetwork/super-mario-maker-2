@@ -34,18 +34,17 @@ var smm2ReglagesEntiers = map[int]int32{
 // statsMultijoueurDe : la table multiplayer_stats du profil.
 //
 // La capture Nintendo du 2026-10-02 donne, pour un compte sans parties Versus,
-// TOUTES les cles 0 a 14 : 0 vaut 0, 1 vaut 1, les autres valent 0 (sauf les
-// compteurs cooperatifs deja acquis). Nos cinq cles 0, 2, 3, 10, 11 omettaient
-// notamment la cle 1, et la note 1500 de la cle 0 etait une supposition.
-// Les compteurs restent a zero tant que les resultats de matches ne sont pas
-// enregistres. Le remplacement 9997 est conserve pour les essais controles.
+// TOUTES les cles 0 a 14 : 0 vaut 0 ou la note, 1 vaut 1, les autres valent 0 (sauf les
+// compteurs cooperatifs deja acquis). Le remplacement 9997 est conserve pour les essais controles.
 func statsMultijoueurDe(pid uint64) map[uint8]uint32 {
-	note := uint32(formeEssai(9997, 0)) // 9997 : pas une methode, juste un nom de fichier
-	stats := make(map[uint8]uint32, 15)
-	for i := uint8(0); i < 15; i++ {
-		stats[i] = 0
+	if f := formeEssai(9997, -1); f >= 0 {
+		stats := make(map[uint8]uint32, 15)
+		for i := uint8(0); i < 15; i++ {
+			stats[i] = 0
+		}
+		stats[0] = uint32(f)
+		stats[1] = 1
+		return stats
 	}
-	stats[0] = note
-	stats[1] = 1
-	return stats
+	return versus.multiplayerStats(pid)
 }
