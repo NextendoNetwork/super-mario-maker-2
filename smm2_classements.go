@@ -47,6 +47,11 @@ func candidatsClassement() map[uint64]bool {
 		pids[pid] = true
 	}
 	endless.mu.RUnlock()
+	versus.mu.RLock()
+	for pid := range versus.parJoueur {
+		pids[pid] = true
+	}
+	versus.mu.RUnlock()
 	for _, m := range niveauxPublics() {
 		pids[m.OwnerPID] = true
 	}
@@ -166,6 +171,20 @@ func smm2SearchUsersEndlessMode(conn *nex.Connection, req *nex.RMCMessage) *nex.
 	depart, nombre := lirePlage(p)
 	l, r, encore := classer(func(pid uint64) uint32 { return endless.recordsDe(pid)[difficulte%4] }, depart, nombre)
 	return repondreClassement(conn, req, fmt.Sprintf("search_users_endless_mode(51) difficulte=%d", difficulte), l, r, encore)
+}
+
+// 52 SearchUsersBattleMode : { Uint32 option, Buffer, ResultRange }. Le classement du mode versus.
+func smm2SearchUsersBattleMode(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
+	in := nex.NewStreamIn(req.Body, conn.Settings)
+	_ = in.U8()
+	p := in.Substream()
+	_ = p.U32()
+	_ = p.Buffer()
+	depart, nombre := lirePlage(p)
+	l, r, encore := classer(func(pid uint64) uint32 {
+		return versus.ratingDe(pid)
+	}, depart, nombre)
+	return repondreClassement(conn, req, "search_users_battle_mode(52)", l, r, encore)
 }
 
 // 57 SearchUsersClearRanking : { Uint8, Uint32 option, Buffer, ResultRange }. Le Uint8
