@@ -388,7 +388,7 @@ func smm2GetBattleModeRating(conn *nex.Connection, req *nex.RMCMessage) *nex.RMC
 	//
 	//	echo "1,1500,1,350,1" > /opt/smm2/smm2_117.valeurs
 	//	       ^   ^    ^     champ0 , puis (valeur,drapeau) pour chacune des deux structures
-	classe, notes := valeursVersus()
+	classe, notes := valeursVersusForPID(conn.PID)
 
 	out := encode117(s, classe, notes)
 
@@ -585,85 +585,63 @@ func encode117(s *nex.Settings, classe bool, notes [2]note117) []byte {
 	return out.Bytes()
 }
 
-// encode119 rend la reponse de la 119 : DEUX structures { uint32 ; bool } et rien devant.
-//
-// Sa forme vient du meme endroit que celle de la 117 — l'analyseur du client, ici a
-// 0x5e7ad0 — et elle en differe par un detail qui suffit a tout casser : pas de bool de
-// tete. C'est pour ce genre d'ecart d'un octet qu'on lit le binaire au lieu de supposer
-// que deux methodes voisines se ressemblent.
-func encode119(s *nex.Settings) []byte {
-	_, notes := valeursVersus()
-
+// encode119WithNotes rend la reponse de la 119 avec les notes donnees.
+func encode119WithNotes(s *nex.Settings, notes [2]note117) []byte {
 	out := nex.NewStreamOut(s)
 	out.Write(structNote117(s, notes[0]))
 	out.Write(structNote117(s, notes[1]))
-
 	return out.Bytes()
 }
 
-// valeursVersus lit les notes servies au mode versus, partagees par la 117 et la 119.
-//
-// ELLES SONT PARTAGEES A DESSEIN. La 117 les donne avant le match, la 119 les rend a la fin ;
-// servir le defaut d'un cote et une vraie note de l'autre, c'est exactement le melange qui
-// faisait planter la console a l'arrivee.
-//
-// Mesure du 2026-09-02 : avec le centinelle du client (0xFFFFFFFF, invalide) la partie
-// plantait au moment de franchir le but et la 119 n'etait JAMAIS appelee — zero fois depuis
-// la mise en service. Avec 1500/350 declares valides, la 119 arrive. La forme etait juste
-// depuis la veille ; c'etaient les valeurs qui manquaient.
-//
-// ⚠️ 1500 et 350 sont les valeurs d'ouverture usuelles d'un classement Glicko-2, pas une
-// mesure. Elles marchent, ce qui ne veut pas dire qu'elles sont les bonnes.
-//
-// MESURE CHEZ NINTENDO le 2026-10-02, et ce sont desormais les valeurs par defaut. Capture
-// d'une console sur les serveurs officiels, compte sans aucun historique de versus, 117
-// demandee deux fois avant la recherche d'adversaire, reponse identique les deux fois :
-//
-//	00 | 00 05000000 ffffffff 00 | 00 05000000 00000000 01
-//	bool false | { 0xFFFFFFFF, false } | { 0, true }
-//
-// Ca concorde avec la mesure du 09-02 : avec les DEUX structures invalides la console
-// plantait a l'arrivee ; Nintendo laisse bien la premiere invalide, mais la seconde est
-// VALIDE (a zero). C'est la seconde qui manquait.
-//
-// Ce sont les valeurs d'un joueur sans historique. Un joueur classe en aurait d'autres, mais
-// personne n'a d'historique de versus sur Nextendo : c'est le bon point de depart. Le fichier
-// smm2_117.valeurs garde la main s'il existe — et en production il porte encore
-// "1,1500,1,350,1" : il faut le RETIRER pour que ces valeurs-ci s'appliquent.
-//
-// La 119 partage ces valeurs (voir plus haut). Sa reponse chez Nintendo n'est PAS mesuree :
-// la capture n'a trouve aucun adversaire, donc aucune fin de match.
+// encode119 rend la reponse de la 119 : DEUX structures { uint32 ; bool } et rien devant.
+func encode119(s *nex.Settings) []byte {
+	_, notes := valeursVersus()
+	return encode119WithNotes(s, notes)
+}
+
+// valeursVersus lit les notes par defaut.
 func valeursVersus() (bool, [2]note117) {
+	return valeursVersusForPID(0)
+}
+
+// valeursVersusForPID lit les notes servies au mode versus pour un joueur donne.
+func valeursVersusForPID(pid uint64) (bool, [2]note117) {
 	classe := false
 	notes := [2]note117{{0xFFFFFFFF, false}, {0, true}}
 
-	b, err := os.ReadFile("/data/smm2_117.valeurs")
-	if err != nil {
+	if b, err := os.ReadFile("/data/smm2_117.valeurs"); err == nil {
+		champs := strings.Split(strings.TrimSpace(string(b)), ",")
+		lire := func(i int) (uint32, bool) {
+			if i >= len(champs) {
+				return 0, false
+			}
+			n, err := strconv.ParseUint(strings.TrimSpace(champs[i]), 10, 32)
+			return uint32(n), err == nil
+		}
+		if v, ok := lire(0); ok {
+			classe = v != 0
+		}
+		for k := 0; k < 2; k++ {
+			if v, ok := lire(1 + 2*k); ok {
+				notes[k].valeur = v
+			}
+			if v, ok := lire(2 + 2*k); ok {
+				notes[k].valide = v != 0
+			}
+		}
 		return classe, notes
 	}
 
-	champs := strings.Split(strings.TrimSpace(string(b)), ",")
-	lire := func(i int) (uint32, bool) {
-		if i >= len(champs) {
-			return 0, false
-		}
-		n, err := strconv.ParseUint(strings.TrimSpace(champs[i]), 10, 32)
-
-		return uint32(n), err == nil
-	}
-	if v, ok := lire(0); ok {
-		classe = v != 0
-	}
-	for k := 0; k < 2; k++ {
-		if v, ok := lire(1 + 2*k); ok {
-			notes[k].valeur = v
-		}
-		if v, ok := lire(2 + 2*k); ok {
-			notes[k].valide = v != 0
-		}
+	if pid == 0 {
+		return classe, notes
 	}
 
-	return classe, notes
+	st := versus.statsDe(pid)
+	if st.Parties == 0 {
+		return false, [2]note117{{0xFFFFFFFF, false}, {0, true}}
+	}
+	tier := rangTierDe(st.Rating)
+	return true, [2]note117{{st.Rating, true}, {tier, true}}
 }
 
 // smm2SearchCoursesBattleMode : la methode 77, le niveau que joue le mode VERSUS.
