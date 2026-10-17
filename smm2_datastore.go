@@ -305,7 +305,7 @@ func smm2DataStoreHandler() nex.RMCHandler {
 			return nex.NewRMCSuccess(s, 0x73, req.Method, req.CallID, nil)
 
 		case 119:
-			// EndBattleMode : resultat du combat versus, calcule par la console.
+			// EndBattleMode : resultat du combat versus ou cooperation, calcule par la console.
 			// D'apres 0x5ebef0 dans le binaire, EndBattleModeParam porte :
 			//   - battleResults : Map<U64, U8> (PID -> rang d'arrivee 1..4)
 			//   - killCount     : U32
@@ -317,6 +317,7 @@ func smm2DataStoreHandler() nex.RMCHandler {
 			in := nex.NewStreamIn(req.Body, s)
 			var rangJoueur uint8 = 2
 			var kills, deaths, rate, dev, vol, gid uint32
+			var isCoop bool
 
 			if in.Remaining() > 0 {
 				p := in
@@ -325,13 +326,22 @@ func smm2DataStoreHandler() nex.RMCHandler {
 					p = in.Substream()
 				}
 				numResults := p.U32()
+				var winCount int
 				for i := uint32(0); i < numResults && p.Remaining() >= 9; i++ {
 					targetPID := p.U64()
 					r := p.U8()
 					if targetPID == conn.PID {
 						rangJoueur = r
 					}
+					if r == 1 || r == 3 { // 1 = 1er/gagne, 3 = MultiClear
+						winCount++
+					}
 				}
+				// Si plus d'un joueur a le rang 1 ou si le statut vaut 3 (MultiClear), c'est du coop
+				if winCount > 1 || rangJoueur == 3 {
+					isCoop = true
+				}
+
 				kills = p.U32()
 				deaths = p.U32()
 				rate = p.U32()
@@ -340,11 +350,21 @@ func smm2DataStoreHandler() nex.RMCHandler {
 				gid = p.U32()
 			}
 
-			newRating, tier := versus.enregistrerFinMatch(conn.PID, rangJoueur, kills, deaths, rate, dev, vol)
+			var newRating, tier uint32
+			if isCoop {
+				reussi := (rangJoueur == 1 || rangJoueur == 3)
+				versus.enregistrerFinMatchCoop(conn.PID, reussi)
+				st := versus.statsDe(conn.PID)
+				newRating = st.Rating
+				tier = rangTierDe(st.Rating)
+				fmt.Printf("[SMM2 Courses] coop 0x73.119 pid=%d reussi=%v gid=%d -> parties=%d victoires=%d streak=%d\n",
+					conn.PID, reussi, gid, st.PartiesCoop, st.VictoiresCoop, st.StreakCoop)
+			} else {
+				newRating, tier = versus.enregistrerFinMatch(conn.PID, rangJoueur, kills, deaths, rate, dev, vol)
+				fmt.Printf("[SMM2 Courses] versus 0x73.119 pid=%d rang=%d gid=%d -> rating=%d tier=%d\n",
+					conn.PID, rangJoueur, gid, newRating, tier)
+			}
 			resultats.toucher(conn.PID)
-
-			fmt.Printf("[SMM2 Courses] versus 0x73.119 pid=%d rang=%d gid=%d -> rating=%d tier=%d\n",
-				conn.PID, rangJoueur, gid, newRating, tier)
 
 			respNotes := [2]note117{
 				{newRating, true},
