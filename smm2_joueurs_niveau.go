@@ -87,6 +87,7 @@ func repondreJoueursDuNiveau(conn *nex.Connection, req *nex.RMCMessage, critere 
 		if !ok {
 			continue
 		}
+		prof.Demandeur = conn.PID
 		nex.EcrireUserInfo(corps, prof)
 		n++
 	}
