@@ -45,25 +45,12 @@ type resultatNiveau struct {
 // record, pas la liste de qui a joue. Un joueur qui termine un niveau sans battre le
 // record n'y laisse aucune trace, et ses parties disparaitraient du compte.
 type statsJoueur struct {
-	Parties    uint32 `json:"parties"`
-	Reussites  uint32 `json:"reussites"`
-	Tentatives uint32 `json:"tentatives"`
-
-	// Premieres reussites et records sont tenus A JOUR, pas recalcules.
-	//
-	// La premiere version les COMPTAIT sur tout le catalogue a chaque consultation de
-	// profil. Avec trente niveaux c'est invisible ; GetUsers est la methode la plus
-	// appelee du serveur (457 fois dans un seul journal), donc avec dix mille niveaux
-	// c'etait dix mille tours de boucle par consultation, et autant pour le compte des
-	// publications. On tient donc des compteurs.
-	//
-	// Le piege qui m'avait fait choisir le comptage : un record CHANGE DE MAIN. Un
-	// compteur qui ne sait qu'augmenter le laisserait a l'ancien detenteur pour
-	// toujours. La reponse n'est pas de tout recompter, c'est de decrementer l'ancien
-	// au moment precis ou il perd son record — moment qu'on controle, puisqu'il n'y a
-	// qu'un seul endroit ou un record change.
+	Parties            uint32 `json:"parties"`
+	Reussites          uint32 `json:"reussites"`
+	Tentatives         uint32 `json:"tentatives"`
 	PremieresReussites uint32 `json:"premieres_reussites"`
 	Records            uint32 `json:"records"`
+	DerniereActivite   int64  `json:"derniere_activite,omitempty"`
 }
 
 type magasinResultats struct {
@@ -151,6 +138,7 @@ func (m *magasinResultats) enregistrer(dataID, pid uint64, tentatives, ms uint32
 	}
 	j.Parties++
 	j.Tentatives += tentatives
+	j.DerniereActivite = nowUnix()
 
 	if termine {
 		j.Reussites++
@@ -347,20 +335,45 @@ func derniereChaine(b []byte) string {
 // premieres reussites et les records se COMPTENT sur le catalogue, parce qu'ils
 // changent de main : celui qui detient un record le perd quand un autre fait mieux, et
 // un compteur incremente ne saurait pas le lui retirer.
+// toucher met a jour l'instant de derniere activite du joueur.
+func (m *magasinResultats) toucher(pid uint64) {
+	if pid == 0 {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	j, ok := m.parJoueur[pid]
+	if !ok {
+		j = &statsJoueur{}
+		m.parJoueur[pid] = j
+	}
+	j.DerniereActivite = nowUnix()
+	m.modifie = true
+}
+
 func (m *magasinResultats) statsDe(pid uint64) nex.SMM2StatsJoueur {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	likes, pts, ptsSem := notes.statsCreateur(pid)
+	dernierUp := courses.dernierUpload(pid)
 
 	j, ok := m.parJoueur[pid]
 	if !ok {
 		return nex.SMM2StatsJoueur{
-			LikesRecus:     likes,
-			PointsCreateur: pts,
-			PointsSemaine:  ptsSem,
+			LikesRecus:       likes,
+			PointsCreateur:   pts,
+			PointsSemaine:    ptsSem,
+			DerniereActivite: nowUnix(),
+			DerniereUpload:   dernierUp,
 		}
 	}
+
+	act := j.DerniereActivite
+	if act == 0 {
+		act = nowUnix()
+	}
+
 	return nex.SMM2StatsJoueur{
 		Parties:            j.Parties,
 		Reussites:          j.Reussites,
@@ -370,6 +383,8 @@ func (m *magasinResultats) statsDe(pid uint64) nex.SMM2StatsJoueur {
 		LikesRecus:         likes,
 		PointsCreateur:     pts,
 		PointsSemaine:      ptsSem,
+		DerniereActivite:   act,
+		DerniereUpload:     dernierUp,
 	}
 }
 
