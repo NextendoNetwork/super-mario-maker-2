@@ -351,9 +351,15 @@ func (m *magasinResultats) statsDe(pid uint64) nex.SMM2StatsJoueur {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
+	likes, pts, ptsSem := notes.statsCreateur(pid)
+
 	j, ok := m.parJoueur[pid]
 	if !ok {
-		return nex.SMM2StatsJoueur{}
+		return nex.SMM2StatsJoueur{
+			LikesRecus:     likes,
+			PointsCreateur: pts,
+			PointsSemaine:  ptsSem,
+		}
 	}
 	return nex.SMM2StatsJoueur{
 		Parties:            j.Parties,
@@ -361,6 +367,9 @@ func (m *magasinResultats) statsDe(pid uint64) nex.SMM2StatsJoueur {
 		Tentatives:         j.Tentatives,
 		PremieresReussites: j.PremieresReussites,
 		Records:            j.Records,
+		LikesRecus:         likes,
+		PointsCreateur:     pts,
+		PointsSemaine:      ptsSem,
 	}
 }
 
