@@ -353,6 +353,7 @@ func startStorageServer() {
 	notes.charger(storageDir)
 	suivis.charger(storageDir)
 	notifications.charger(storageDir)
+	versus.charger(storageDir)
 	// Une seule passe au demarrage pour etablir premieres reussites et records, et pour
 	// rattraper les fichiers ecrits avant que ces compteurs existent.
 	resultats.reconstruireCompteurs()
